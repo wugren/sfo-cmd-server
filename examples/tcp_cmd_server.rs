@@ -10,10 +10,11 @@ use rustls::{DigitallySignedStruct, DistinguishedName, Error, ServerConfig, Sign
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::version::TLS13;
 use tokio::net::TcpListener;
-use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite};
+use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use rustls::pki_types::pem::PemObject;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 use sfo_cmd_server::server::{CmdServer, CmdTunnelListener};
@@ -120,8 +121,10 @@ impl TlsConnection {
 
 #[async_trait::async_trait]
 impl CmdTunnel for TlsConnection {
-    fn get_tls_key(&self) -> Vec<u8> {
-        self.tls_key.clone()
+    fn get_remote_peer_id(&self) -> PeerId {
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(self.tls_key.as_slice());
+        PeerId::from(sha256.finalize().as_slice().to_vec())
     }
 
     fn split(&self) -> CmdResult<(Box<dyn CmdTunnelRead>, Box<dyn CmdTunnelWrite>)> {

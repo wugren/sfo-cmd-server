@@ -63,8 +63,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
     async fn run(self: &Arc<Self>) -> CmdResult<()> {
         loop {
             let tunnel = self.tunnel_listener.accept().await?;
-            let tls_key = tunnel.get_tls_key();
-            let peer_id = PeerId::from(tls_key.as_slice());
+            let peer_id = tunnel.get_remote_peer_id();
             let this = self.clone();
             tokio::spawn(async move {
                 let remote_id = peer_id.clone();

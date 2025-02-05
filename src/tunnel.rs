@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::errors::CmdResult;
+use crate::PeerId;
 
 pub trait CmdTunnelRead: Send + Sync + AsyncRead + 'static + Unpin + Any {
     fn get_any(&self) -> &dyn Any;
@@ -14,7 +15,7 @@ pub trait CmdTunnelWrite: AsyncWrite + Send + Sync + 'static + Unpin + Any {
 }
 
 pub trait CmdTunnel: Send + Sync + 'static {
-    fn get_tls_key(&self) -> Vec<u8>;
+    fn get_remote_peer_id(&self) -> PeerId;
     fn split(&self) -> CmdResult<(Box<dyn CmdTunnelRead>, Box<dyn CmdTunnelWrite>)>;
     fn unsplit(&self, read: Box<dyn CmdTunnelRead>, write: Box<dyn CmdTunnelWrite>) -> CmdResult<()>;
 }

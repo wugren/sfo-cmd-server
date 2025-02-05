@@ -13,12 +13,19 @@ impl PeerId {
         Ok(Self(base58.from_base58().map_err(|e| cmd_err!(CmdErrorCode::InvalidParam, "invalid peer id {}", base58))?))
     }
 
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 impl From<&[u8]> for PeerId {
     fn from(key: &[u8]) -> Self {
-        let mut sha256 = sha2::Sha256::new();
-        sha256.update(key);
-        Self(sha256.finalize().as_slice().to_vec())
+        Self(key.to_vec())
+    }
+}
+
+impl From<Vec<u8>> for PeerId {
+    fn from(key: Vec<u8>) -> Self {
+        Self(key)
     }
 }

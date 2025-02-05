@@ -11,9 +11,10 @@ use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::pki_types::pem::PemObject;
 use rustls::version::TLS13;
+use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsConnector;
-use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelRef, CmdTunnelWrite};
+use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelRef, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 
@@ -119,8 +120,10 @@ impl TlsConnection {
 
 #[async_trait::async_trait]
 impl CmdTunnel for TlsConnection {
-    fn get_tls_key(&self) -> Vec<u8> {
-        self.tls_key.clone()
+    fn get_remote_peer_id(&self) -> PeerId {
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(self.tls_key.as_slice());
+        PeerId::from(sha256.finalize().as_slice().to_vec())
     }
 
     fn split(&self) -> CmdResult<(Box<dyn CmdTunnelRead>, Box<dyn CmdTunnelWrite>)> {
@@ -219,7 +222,7 @@ async fn main() {
     });
 
     let mut send = client.get_send().await.unwrap();
-    send.send::<u16, u8>(0x01, vec![].as_slice()).await.unwrap();
+    send.send(0x01, vec![].as_slice()).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 }

@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::hash::Hash;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{into_pool_err, PoolErrorCode, PoolResult, Worker, WorkerFactory, WorkerGuard, WorkerPool, WorkerPoolRef};
@@ -12,25 +10,31 @@ use crate::{CmdTunnelRef, CmdTunnelWrite};
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
-use crate::server::CmdServer;
 
 #[async_trait::async_trait]
 pub trait CmdTunnelFactory: Send + Sync + 'static {
     async fn create_tunnel(&self) -> CmdResult<CmdTunnelRef>;
 }
 
-pub struct CmdSend {
+pub struct CmdSend<LEN, CMD>
+where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
     recv_handle: JoinHandle<CmdResult<()>>,
     write: Box<dyn CmdTunnelWrite>,
-    is_work: bool
+    is_work: bool,
+    _p: std::marker::PhantomData<(LEN, CMD)>,
+
 }
 
-impl CmdSend {
+impl<LEN, CMD> CmdSend<LEN, CMD>
+where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
     pub fn new(recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
         Self {
             recv_handle,
             write,
             is_work: true,
+            _p: Default::default(),
         }
     }
 
@@ -39,9 +43,7 @@ impl CmdSend {
         self.recv_handle.abort();
     }
 
-    pub async fn send<LEN, CMD>(&mut self, cmd: CMD, body: &[u8]) -> CmdResult<()>
-    where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-          CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
+    pub async fn send(&mut self, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         self.write.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -49,13 +51,17 @@ impl CmdSend {
         Ok(()) }
 }
 
-impl Drop for CmdSend {
+impl<LEN, CMD> Drop for CmdSend<LEN, CMD>
+where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
     fn drop(&mut self) {
         self.set_disable();
     }
 }
 
-impl Worker for CmdSend {
+impl<LEN, CMD> Worker for CmdSend<LEN, CMD>
+where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static{
     fn is_work(&self) -> bool {
         self.is_work && !self.recv_handle.is_finished()
     }
@@ -83,10 +89,10 @@ impl<F: CmdTunnelFactory,
 #[async_trait::async_trait]
 impl<F: CmdTunnelFactory,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> WorkerFactory<CmdSend> for CmdWriteFactory<F, LEN, CMD> {
-    async fn create(&self) -> PoolResult<CmdSend> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> WorkerFactory<CmdSend<LEN, CMD>> for CmdWriteFactory<F, LEN, CMD> {
+    async fn create(&self) -> PoolResult<CmdSend<LEN, CMD>> {
         let tunnel = self.tunnel_factory.create_tunnel().await.map_err(into_pool_err!(PoolErrorCode::Failed))?;
-        let peer_id = PeerId::from(tunnel.get_tls_key().as_slice());
+        let peer_id = tunnel.get_remote_peer_id();
         let (mut recv, write) = tunnel.split().map_err(into_pool_err!(PoolErrorCode::Failed))?;
         let cmd_handler = self.cmd_handler.clone();
         let handle = spawn(async move {
@@ -120,7 +126,7 @@ impl<F: CmdTunnelFactory,
 pub struct CmdClient<F: CmdTunnelFactory,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> {
-    tunnel_pool: WorkerPoolRef<CmdSend, CmdWriteFactory<F, LEN, CMD>>,
+    tunnel_pool: WorkerPoolRef<CmdSend<LEN, CMD>, CmdWriteFactory<F, LEN, CMD>>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
 
@@ -148,7 +154,7 @@ impl<F: CmdTunnelFactory,
         self.cmd_handler_map.insert(cmd, handler);
     }
 
-    pub async fn get_send(&self) -> CmdResult<WorkerGuard<CmdSend, CmdWriteFactory<F, LEN, CMD>>> {
+    pub async fn get_send(&self) -> CmdResult<WorkerGuard<CmdSend<LEN, CMD>, CmdWriteFactory<F, LEN, CMD>>> {
         self.tunnel_pool.get_worker().await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 }
