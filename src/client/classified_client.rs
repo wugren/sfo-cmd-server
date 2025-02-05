@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::sync::{Arc};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
-use sfo_pool::{into_pool_err, PoolErrorCode, PoolResult, Worker, WorkerFactory, WorkerGuard, WorkerPool, WorkerPoolRef};
+use sfo_pool::{into_pool_err, ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, Worker, WorkerClassification, WorkerFactory, WorkerGuard, WorkerPool, WorkerPoolRef};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -11,29 +11,37 @@ use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
 
-#[async_trait::async_trait]
-pub trait CmdTunnelFactory<T: CmdTunnel>: Send + Sync + 'static {
-    async fn create_tunnel(&self) -> CmdResult<Arc<T>>;
+pub trait ClassifiedCmdTunnel<C: WorkerClassification>: CmdTunnel {
+    fn get_classification(&self) -> C;
 }
 
-pub struct CmdSend<LEN, CMD>
-where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+#[async_trait::async_trait]
+pub trait CmdTunnelFactory<C: WorkerClassification,T: ClassifiedCmdTunnel<C>>: Send + Sync + 'static {
+    async fn create_tunnel(&self, classification: Option<C>) -> CmdResult<Arc<T>>;
+}
+
+pub struct CmdSend<C, LEN, CMD>
+where C: WorkerClassification,
+      LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
     recv_handle: JoinHandle<CmdResult<()>>,
     write: Box<dyn CmdTunnelWrite>,
     is_work: bool,
+    classification: C,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 
 }
 
-impl<LEN, CMD> CmdSend<LEN, CMD>
-where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+impl<C, LEN, CMD> CmdSend<C, LEN, CMD>
+where C: WorkerClassification,
+      LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
-    pub fn new(recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
+    pub fn new(classification: C, recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
         Self {
             recv_handle,
             write,
             is_work: true,
+            classification,
             _p: Default::default(),
         }
     }
@@ -62,25 +70,36 @@ where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fr
     }
 }
 
-impl<LEN, CMD> Drop for CmdSend<LEN, CMD>
-where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+impl<C, LEN, CMD> Drop for CmdSend<C, LEN, CMD>
+where C: WorkerClassification,
+      LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
     fn drop(&mut self) {
         self.set_disable();
     }
 }
 
-impl<LEN, CMD> Worker for CmdSend<LEN, CMD>
-where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+impl<C, LEN, CMD> ClassifiedWorker<C> for CmdSend<C, LEN, CMD>
+where C: WorkerClassification,
+      LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static{
     fn is_work(&self) -> bool {
         self.is_work && !self.recv_handle.is_finished()
     }
+
+    fn is_valid(&self, c: C) -> bool {
+        self.classification == c
+    }
+
+    fn classification(&self) -> C {
+        self.classification.clone()
+    }
 }
 
 
-pub struct CmdWriteFactory<T: CmdTunnel,
-    F: CmdTunnelFactory<T>,
+pub struct CmdWriteFactory<C: WorkerClassification,
+    T: ClassifiedCmdTunnel<C>,
+    F: CmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> {
     tunnel_factory: F,
@@ -88,10 +107,11 @@ pub struct CmdWriteFactory<T: CmdTunnel,
     _p: std::marker::PhantomData<T>,
 }
 
-impl<T: CmdTunnel,
-    F: CmdTunnelFactory<T>,
+impl<C: WorkerClassification,
+    T: ClassifiedCmdTunnel<C>,
+    F: CmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> CmdWriteFactory<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> CmdWriteFactory<C, T, F, LEN, CMD> {
     pub fn new(tunnel_factory: F, cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
         Self {
             tunnel_factory,
@@ -102,12 +122,14 @@ impl<T: CmdTunnel,
 }
 
 #[async_trait::async_trait]
-impl<T: CmdTunnel,
-    F: CmdTunnelFactory<T>,
+impl<C: WorkerClassification,
+    T: ClassifiedCmdTunnel<C>,
+    F: CmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> WorkerFactory<CmdSend<LEN, CMD>> for CmdWriteFactory<T, F, LEN, CMD> {
-    async fn create(&self) -> PoolResult<CmdSend<LEN, CMD>> {
-        let tunnel = self.tunnel_factory.create_tunnel().await.map_err(into_pool_err!(PoolErrorCode::Failed))?;
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> ClassifiedWorkerFactory<C, CmdSend<C, LEN, CMD>> for CmdWriteFactory<C, T, F, LEN, CMD> {
+    async fn create(&self, classification: Option<C>) -> PoolResult<CmdSend<C, LEN, CMD>> {
+        let tunnel = self.tunnel_factory.create_tunnel(classification).await.map_err(into_pool_err!(PoolErrorCode::Failed))?;
+        let classification = tunnel.get_classification();
         let peer_id = tunnel.get_remote_peer_id();
         let (mut recv, write) = tunnel.split().map_err(into_pool_err!(PoolErrorCode::Failed))?;
         let cmd_handler = self.cmd_handler.clone();
@@ -135,27 +157,29 @@ impl<T: CmdTunnel,
             }.await;
             ret
         });
-        Ok(CmdSend::new(handle, write))
+        Ok(CmdSend::new(classification, handle, write))
     }
 }
 
-pub struct CmdClient<T: CmdTunnel,
-    F: CmdTunnelFactory<T>,
+pub struct CmdClient<C: WorkerClassification,
+    T: ClassifiedCmdTunnel<C>,
+    F: CmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> {
-    tunnel_pool: WorkerPoolRef<CmdSend<LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>,
+    tunnel_pool: ClassifiedWorkerPoolRef<C, CmdSend<C, LEN, CMD>, CmdWriteFactory<C, T, F, LEN, CMD>>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
 
-impl<T: CmdTunnel,
-    F: CmdTunnelFactory<T>,
+impl<C: WorkerClassification,
+    T: ClassifiedCmdTunnel<C>,
+    F: CmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> CmdClient<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> CmdClient<C, T, F, LEN, CMD> {
     pub fn new(factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
         Arc::new(Self {
-            tunnel_pool: WorkerPool::new(tunnel_count, CmdWriteFactory::<_, _, LEN, CMD>::new(factory, move |peer_id: PeerId, header: CmdHeader<LEN, CMD>, buf| {
+            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, CmdWriteFactory::<C, _, _, LEN, CMD>::new(factory, move |peer_id: PeerId, header: CmdHeader<LEN, CMD>, buf| {
                 let handler_map = handler_map.clone();
                 async move {
                     if let Some(handler) = handler_map.get(header.cmd_code()) {
@@ -172,8 +196,12 @@ impl<T: CmdTunnel,
         self.cmd_handler_map.insert(cmd, handler);
     }
 
-    pub async fn get_send(&self) -> CmdResult<WorkerGuard<CmdSend<LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>> {
+    pub async fn get_send(&self) -> CmdResult<ClassifiedWorkerGuard<C, CmdSend<C, LEN, CMD>, CmdWriteFactory<C, T, F, LEN, CMD>>> {
         self.tunnel_pool.get_worker().await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+    }
+
+    pub async fn get_classification_send(&self, classification: C) -> CmdResult<ClassifiedWorkerGuard<C, CmdSend<C, LEN, CMD>, CmdWriteFactory<C, T, F, LEN, CMD>>> {
+        self.tunnel_pool.get_classified_worker(classification).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 }
 

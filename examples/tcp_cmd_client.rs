@@ -14,7 +14,7 @@ use rustls::version::TLS13;
 use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsConnector;
-use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelRef, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 
@@ -201,8 +201,8 @@ impl TlsConnectionFactory {
 }
 
 #[async_trait::async_trait]
-impl CmdTunnelFactory for TlsConnectionFactory {
-    async fn create_tunnel(&self) -> CmdResult<CmdTunnelRef> {
+impl CmdTunnelFactory<TlsConnection> for TlsConnectionFactory {
+    async fn create_tunnel(&self) -> CmdResult<Arc<TlsConnection>> {
         let socket = tokio::net::TcpStream::connect("127.0.0.1:4453").await.map_err(into_cmd_err!(CmdErrorCode::IoError, "connect to server failed"))?;
         let tls_stream = self.tls_connector.connect("127.0.0.1".to_string().try_into().unwrap(), socket).await.map_err(into_cmd_err!(CmdErrorCode::IoError, "tls handshake failed"))?;
         Ok(Arc::new(TlsConnection::new(tls_stream)))
@@ -210,10 +210,10 @@ impl CmdTunnelFactory for TlsConnectionFactory {
 }
 #[tokio::main]
 async fn main() {
-    let client = CmdClient::<_, u16, u8>::new(TlsConnectionFactory::new(), 5);
+    let client = CmdClient::<_, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
 
     let sender = client.clone();
-    client.attach_cmd_handler(0x02, move |peer_id, header: CmdHeader<u16, u8>, body| {
+    client.register_cmd_handler(0x02, move |peer_id, header: CmdHeader<u16, u8>, body| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());

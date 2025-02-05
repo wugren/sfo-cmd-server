@@ -1,5 +1,4 @@
 use base58::{FromBase58, ToBase58};
-use sha2::Digest;
 use crate::errors::{cmd_err, CmdErrorCode, CmdResult};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -10,7 +9,7 @@ impl PeerId {
     }
 
     pub fn from_base58(base58: &str) -> CmdResult<Self> {
-        Ok(Self(base58.from_base58().map_err(|e| cmd_err!(CmdErrorCode::InvalidParam, "invalid peer id {}", base58))?))
+        Ok(Self(base58.from_base58().map_err(|_| cmd_err!(CmdErrorCode::InvalidParam, "invalid peer id {}", base58))?))
     }
 
     pub fn as_slice(&self) -> &[u8] {

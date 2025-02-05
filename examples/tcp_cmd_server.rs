@@ -209,8 +209,8 @@ impl TunnelListener {
     }
 }
 #[async_trait::async_trait]
-impl CmdTunnelListener for TunnelListener {
-    async fn accept(&self) -> sfo_cmd_server::errors::CmdResult<Arc<dyn CmdTunnel>> {
+impl CmdTunnelListener<TlsConnection> for TunnelListener {
+    async fn accept(&self) -> sfo_cmd_server::errors::CmdResult<Arc<TlsConnection>> {
         let (stream, _) = self.tcp_listener.accept().await.map_err(into_cmd_err!(CmdErrorCode::IoError, "accept failed"))?;
         let tls_stream = self.tls_acceptor.accept(stream).await.map_err(into_cmd_err!(CmdErrorCode::TlsError, "tls accept failed"))?;
         Ok(Arc::new(TlsConnection::new(tls_stream)))
@@ -220,9 +220,9 @@ impl CmdTunnelListener for TunnelListener {
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = CmdServer::<u16, u8, _>::new(listener);
+    let server = CmdServer::<u16, u8, TlsConnection, _>::new(listener);
     let sender = server.clone();
-    server.attach_cmd_handler(0x01, move |peer_id, header: CmdHeader<u16, u8>, body| {
+    server.register_cmd_handler(0x01, move |peer_id, header: CmdHeader<u16, u8>, body| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());

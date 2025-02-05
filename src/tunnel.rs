@@ -19,4 +19,3 @@ pub trait CmdTunnel: Send + Sync + 'static {
     fn split(&self) -> CmdResult<(Box<dyn CmdTunnelRead>, Box<dyn CmdTunnelWrite>)>;
     fn unsplit(&self, read: Box<dyn CmdTunnelRead>, write: Box<dyn CmdTunnelWrite>) -> CmdResult<()>;
 }
-pub type CmdTunnelRef = Arc<dyn CmdTunnel>;

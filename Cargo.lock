@@ -1270,9 +1270,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-pool"
-version = "0.2.1"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a2c2ab36235834710136159489d88076efcebb0c9b918836de2bb801de88db"
+checksum = "51ee9060b07a54282dd5de66e4b735e537181b2a46b634e27e6dd1cad5bc3e2b"
 dependencies = [
  "async-trait",
  "notify-future",
