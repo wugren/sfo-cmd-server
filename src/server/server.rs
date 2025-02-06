@@ -180,7 +180,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                                 }
 
                                 if let Some(handler) = cmd_handler_map.get(header.cmd_code()) {
-                                    if let Err(e) = handler.handle(remote_id.clone(), header, buf).await {
+                                    if let Err(e) = handler.handle(remote_id.clone(), tunnel_id, header, buf).await {
                                         log::error!("handle cmd error: {:?}", e);
                                     }
                                 }

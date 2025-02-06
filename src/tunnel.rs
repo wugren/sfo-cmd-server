@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::errors::CmdResult;
 use crate::PeerId;
+use crate::tunnel_id::TunnelId;
 
 pub trait CmdTunnelRead: Send + Sync + AsyncRead + 'static + Unpin + Any {
     fn get_any(&self) -> &dyn Any;

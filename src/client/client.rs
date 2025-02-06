@@ -6,7 +6,7 @@ use sfo_pool::{into_pool_err, PoolErrorCode, PoolResult, Worker, WorkerFactory, 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
-use crate::{CmdTunnel, CmdTunnelWrite};
+use crate::{CmdTunnel, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
@@ -22,6 +22,7 @@ where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fr
     recv_handle: JoinHandle<CmdResult<()>>,
     write: Box<dyn CmdTunnelWrite>,
     is_work: bool,
+    tunnel_id: TunnelId,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 
 }
@@ -29,13 +30,18 @@ where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fr
 impl<LEN, CMD> CmdSend<LEN, CMD>
 where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
-    pub fn new(recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
+    pub fn new(tunnel_id: TunnelId, recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
         Self {
             recv_handle,
             write,
             is_work: true,
+            tunnel_id,
             _p: Default::default(),
         }
+    }
+
+    pub fn get_tunnel_id(&self) -> TunnelId {
+        self.tunnel_id
     }
 
     pub fn set_disable(&mut self) {
@@ -85,6 +91,7 @@ pub struct CmdWriteFactory<T: CmdTunnel,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> {
     tunnel_factory: F,
     cmd_handler: Arc<dyn CmdHandler<LEN, CMD>>,
+    tunnel_id_generator: TunnelIdGenerator,
     _p: std::marker::PhantomData<T>,
 }
 
@@ -96,6 +103,7 @@ impl<T: CmdTunnel,
         Self {
             tunnel_factory,
             cmd_handler: Arc::new(cmd_handler),
+            tunnel_id_generator: TunnelIdGenerator::new(),
             _p: Default::default(),
         }
     }
@@ -109,6 +117,7 @@ impl<T: CmdTunnel,
     async fn create(&self) -> PoolResult<CmdSend<LEN, CMD>> {
         let tunnel = self.tunnel_factory.create_tunnel().await.map_err(into_pool_err!(PoolErrorCode::Failed))?;
         let peer_id = tunnel.get_remote_peer_id();
+        let tunnel_id = self.tunnel_id_generator.generate();
         let (mut recv, write) = tunnel.split().map_err(into_pool_err!(PoolErrorCode::Failed))?;
         let cmd_handler = self.cmd_handler.clone();
         let handle = spawn(async move {
@@ -127,7 +136,7 @@ impl<T: CmdTunnel,
                             break;
                         }
                     }
-                    if let Err(e) = cmd_handler.handle(peer_id.clone(), header, buf).await {
+                    if let Err(e) = cmd_handler.handle(peer_id.clone(), tunnel_id, header, buf).await {
                         log::error!("handle cmd error: {:?}", e);
                     }
                 }
@@ -135,7 +144,7 @@ impl<T: CmdTunnel,
             }.await;
             ret
         });
-        Ok(CmdSend::new(handle, write))
+        Ok(CmdSend::new(tunnel_id, handle, write))
     }
 }
 
@@ -155,11 +164,11 @@ impl<T: CmdTunnel,
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
         Arc::new(Self {
-            tunnel_pool: WorkerPool::new(tunnel_count, CmdWriteFactory::<_, _, LEN, CMD>::new(factory, move |peer_id: PeerId, header: CmdHeader<LEN, CMD>, buf| {
+            tunnel_pool: WorkerPool::new(tunnel_count, CmdWriteFactory::<_, _, LEN, CMD>::new(factory, move |peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, buf| {
                 let handler_map = handler_map.clone();
                 async move {
                     if let Some(handler) = handler_map.get(header.cmd_code()) {
-                        handler.handle(peer_id, header, buf).await?;
+                        handler.handle(peer_id, tunnel_id, header, buf).await?;
                     }
                     Ok(())
                 }

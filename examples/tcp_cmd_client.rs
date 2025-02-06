@@ -213,7 +213,7 @@ async fn main() {
     let client = CmdClient::<_, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
 
     let sender = client.clone();
-    client.register_cmd_handler(0x02, move |peer_id, header: CmdHeader<u16, u8>, body| {
+    client.register_cmd_handler(0x02, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());

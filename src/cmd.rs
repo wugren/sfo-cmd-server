@@ -5,6 +5,7 @@ use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use num::{FromPrimitive, ToPrimitive};
 use crate::errors::CmdResult;
 use crate::peer_id::PeerId;
+use crate::TunnelId;
 
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
@@ -45,7 +46,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes,
 pub trait CmdHandler<LEN, CMD>: Send + Sync + 'static
 where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
-    async fn handle(&self, peer_id: PeerId, header: CmdHeader<LEN, CMD>, buf: Vec<u8>) -> CmdResult<()>;
+    async fn handle(&self, peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, buf: Vec<u8>) -> CmdResult<()>;
 }
 
 pub(crate) struct CmdHandlerMap<LEN, CMD> {

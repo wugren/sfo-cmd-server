@@ -20,5 +20,3 @@ rustls = { version = "0.23.20", default-features = false, features = ["ring", "s
 rcgen = "0.13.0"
 tokio-rustls = "0.26.1"
 
-[features]
-classified_client = []
