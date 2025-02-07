@@ -4,8 +4,8 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom
 use num::{FromPrimitive, ToPrimitive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
-use crate::{CmdTunnel};
-use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
+use crate::{CmdTunnel, TunnelId};
+use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
 use super::peer_manager::{PeerManager, PeerManagerRef};
@@ -115,7 +115,22 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         Ok(())
     }
 
-    pub async fn send_to_peer_from_all_channels(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+    pub async fn send_to_peer_from_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let conn = self.peer_manager.find_connection(tunnel_id);
+        if conn.is_none() {
+            return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
+        }
+        let conn = conn.unwrap();
+        let mut conn = conn.lock().await;
+        let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
+        let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        Ok(())
+    }
+
+    pub async fn send_to_peer_from_all_tunnels(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
             let _ret: CmdResult<()> = async move {
