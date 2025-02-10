@@ -239,9 +239,6 @@ impl<C: WorkerClassification,
         })
     }
 
-    pub fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
-    }
-
     async fn get_send(&self) -> CmdResult<ClassifiedWorkerGuard<CmdClientTunnelClassification<C>, ClassifiedCmdSend<T, C, LEN, CMD>, CmdWriteFactory<C, T, F, LEN, CMD>>> {
         self.tunnel_pool.get_worker().await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
@@ -291,5 +288,10 @@ impl<C: WorkerClassification,
     async fn send_by_classified_tunnel(&self, classification: C, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let mut send = self.get_classified_send(classification).await?;
         send.send(cmd, body).await
+    }
+
+    async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId> {
+        let send = self.get_classified_send(classification).await?;
+        Ok(send.get_tunnel_id())
     }
 }

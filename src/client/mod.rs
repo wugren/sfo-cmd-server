@@ -24,4 +24,5 @@ pub trait CmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedByte
 pub trait ClassifiedCmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash, C: WorkerClassification>: CmdClient<LEN, CMD> {
     async fn send_by_classified_tunnel(&self, classification: C, cmd: CMD, body: &[u8]) -> CmdResult<()>;
+    async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId>;
 }
