@@ -8,6 +8,7 @@ use crate::{CmdTunnel, TunnelId};
 use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
+use crate::server::CmdServer;
 use super::peer_manager::{PeerManager, PeerManagerRef};
 
 #[async_trait::async_trait]
@@ -65,7 +66,7 @@ impl CmdServerEventListener for CmdServerEventListenerEmit {
     }
 }
 
-pub struct CmdServer<LEN, CMD, T: CmdTunnel, LISTENER> {
+pub struct DefaultCmdServer<LEN, CMD, T: CmdTunnel, LISTENER> {
     tunnel_listener: LISTENER,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
     peer_manager: PeerManagerRef<T>,
@@ -76,7 +77,7 @@ pub struct CmdServer<LEN, CMD, T: CmdTunnel, LISTENER> {
 impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     T: CmdTunnel,
-    LISTENER: CmdTunnelListener<T>> CmdServer<LEN, CMD, T, LISTENER> {
+    LISTENER: CmdTunnelListener<T>> DefaultCmdServer<LEN, CMD, T, LISTENER> {
     pub fn new(tunnel_listener: LISTENER) -> Arc<Self> {
         let event_emit = CmdServerEventListenerEmit::new();
         Arc::new(Self {
@@ -90,60 +91,6 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
 
     pub fn attach_event_listener(&self, event_listener: Arc<dyn CmdServerEventListener>) {
         self.event_emit.attach_event_listener(event_listener);
-    }
-
-    pub fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
-        self.cmd_handler_map.insert(cmd, handler);
-    }
-
-    pub async fn send_to_peer(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
-        let connections = self.peer_manager.find_connections(peer_id);
-        for conn in connections {
-            let ret: CmdResult<()> = async move {
-                let mut conn = conn.lock().await;
-                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
-                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                Ok(())
-            }.await;
-            if ret.is_ok() {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn send_to_peer_from_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
-        if conn.is_none() {
-            return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
-        }
-        let conn = conn.unwrap();
-        let mut conn = conn.lock().await;
-        let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
-        let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        Ok(())
-    }
-
-    pub async fn send_to_peer_from_all_tunnels(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
-        let connections = self.peer_manager.find_connections(peer_id);
-        for conn in connections {
-            let _ret: CmdResult<()> = async move {
-                let mut conn = conn.lock().await;
-                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
-                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                Ok(())
-            }.await;
-        }
-        Ok(())
     }
 
     pub async fn get_peer_tunnels(&self, peer_id: &PeerId) -> Vec<Arc<T>> {
@@ -226,3 +173,62 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
     }
 }
 
+#[async_trait::async_trait]
+impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
+    T: CmdTunnel,
+    LISTENER: CmdTunnelListener<T>> CmdServer<LEN, CMD> for DefaultCmdServer<LEN, CMD, T, LISTENER> {
+    fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
+        self.cmd_handler_map.insert(cmd, handler);
+    }
+
+    async fn send(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let connections = self.peer_manager.find_connections(peer_id);
+        for conn in connections {
+            let ret: CmdResult<()> = async move {
+                let mut conn = conn.lock().await;
+                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
+                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                Ok(())
+            }.await;
+            if ret.is_ok() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_by_specify_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let conn = self.peer_manager.find_connection(tunnel_id);
+        if conn.is_none() {
+            return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
+        }
+        let conn = conn.unwrap();
+        let mut conn = conn.lock().await;
+        let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
+        let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        Ok(())
+    }
+
+    async fn send_by_all_tunnels(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let connections = self.peer_manager.find_connections(peer_id);
+        for conn in connections {
+            let _ret: CmdResult<()> = async move {
+                let mut conn = conn.lock().await;
+                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
+                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                Ok(())
+            }.await;
+        }
+        Ok(())
+    }
+}

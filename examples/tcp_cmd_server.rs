@@ -17,7 +17,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
-use sfo_cmd_server::server::{CmdServer, CmdTunnelListener};
+use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
 
 struct TlsStreamRead {
     read: Option<tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
@@ -220,13 +220,13 @@ impl CmdTunnelListener<TlsConnection> for TunnelListener {
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = CmdServer::<u16, u8, TlsConnection, _>::new(listener);
+    let server = DefaultCmdServer::<u16, u8, TlsConnection, _>::new(listener);
     let sender = server.clone();
     server.register_cmd_handler(0x01, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());
-            sender.send_to_peer(&peer_id, 0x02, vec![].as_slice()).await
+            sender.send(&peer_id, 0x02, vec![].as_slice()).await
         }
     });
     server.start();

@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
 use crate::{CmdTunnel, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
+use crate::client::CmdClient;
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
@@ -165,7 +166,7 @@ impl<T: CmdTunnel,
     }
 }
 
-pub struct CmdClient<T: CmdTunnel,
+pub struct DefaultCmdClient<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> {
@@ -176,7 +177,7 @@ pub struct CmdClient<T: CmdTunnel,
 impl<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> CmdClient<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> DefaultCmdClient<T, F, LEN, CMD> {
     pub fn new(factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
@@ -194,17 +195,31 @@ impl<T: CmdTunnel,
         })
     }
 
-    pub fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
-        self.cmd_handler_map.insert(cmd, handler);
-    }
-
-    pub async fn get_send(&self) -> CmdResult<ClassifiedWorkerGuard<TunnelId, CmdSend<T, LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>> {
+    async fn get_send(&self) -> CmdResult<ClassifiedWorkerGuard<TunnelId, CmdSend<T, LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>> {
         self.tunnel_pool.get_worker().await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 
-    pub async fn get_send_of_tunnel_id(&self, tunnel_id: TunnelId) -> CmdResult<ClassifiedWorkerGuard<TunnelId, CmdSend<T, LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>> {
+    async fn get_send_of_tunnel_id(&self, tunnel_id: TunnelId) -> CmdResult<ClassifiedWorkerGuard<TunnelId, CmdSend<T, LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>> {
         self.tunnel_pool.get_classified_worker(tunnel_id).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 }
 
+#[async_trait::async_trait]
+impl<T: CmdTunnel,
+    F: CmdTunnelFactory<T>,
+    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> CmdClient<LEN, CMD> for DefaultCmdClient<T, F, LEN, CMD> {
+    fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
+        self.cmd_handler_map.insert(cmd, handler);
+    }
 
+    async fn send(&self, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let mut send = self.get_send().await?;
+        send.send(cmd, body).await
+    }
+
+    async fn send_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
+        send.send(cmd, body).await
+    }
+}

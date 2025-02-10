@@ -15,7 +15,7 @@ use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsConnector;
 use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
-use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory};
+use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory, DefaultCmdClient};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 
 struct TlsStreamRead {
@@ -210,7 +210,7 @@ impl CmdTunnelFactory<TlsConnection> for TlsConnectionFactory {
 }
 #[tokio::main]
 async fn main() {
-    let client = CmdClient::<_, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
+    let client = DefaultCmdClient::<_, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
 
     let sender = client.clone();
     client.register_cmd_handler(0x02, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
@@ -221,8 +221,7 @@ async fn main() {
         }
     });
 
-    let mut send = client.get_send().await.unwrap();
-    send.send(0x01, vec![].as_slice()).await.unwrap();
+    client.send(0x01, vec![].as_slice()).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
