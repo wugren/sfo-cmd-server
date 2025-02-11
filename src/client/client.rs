@@ -6,7 +6,7 @@ use sfo_pool::{into_pool_err, pool_err, ClassifiedWorker, ClassifiedWorkerFactor
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
-use crate::{CmdTunnel, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
+use crate::{CmdBodyRead, CmdTunnel, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
 use crate::client::CmdClient;
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
@@ -147,16 +147,13 @@ impl<T: CmdTunnel,
                         break;
                     }
                     let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    let mut buf = vec![0u8; header.pkg_len().to_u64().unwrap() as usize];
-                    if buf.len() > 0 {
-                        let n = recv.read_exact(&mut buf).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                        if n == 0 {
-                            break;
-                        }
-                    }
-                    if let Err(e) = cmd_handler.handle(peer_id.clone(), tunnel_id, header, buf).await {
+                    let cmd_read = CmdBodyRead::new(recv, header.pkg_len().to_u64().unwrap() as usize);
+                    let waiter = cmd_read.get_waiter();
+                    let future = waiter.create_result_future();
+                    if let Err(e) = cmd_handler.handle(peer_id.clone(), tunnel_id, header, cmd_read).await {
                         log::error!("handle cmd error: {:?}", e);
                     }
+                    recv = future.await.map_err(into_cmd_err!(CmdErrorCode::Failed))??;
                 }
                 Ok(())
             }.await;
@@ -182,11 +179,11 @@ impl<T: CmdTunnel,
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
         Arc::new(Self {
-            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, CmdWriteFactory::<_, _, LEN, CMD>::new(factory, move |peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, buf| {
+            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, CmdWriteFactory::<_, _, LEN, CMD>::new(factory, move |peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, body_read| {
                 let handler_map = handler_map.clone();
                 async move {
                     if let Some(handler) = handler_map.get(header.cmd_code()) {
-                        handler.handle(peer_id, tunnel_id, header, buf).await?;
+                        handler.handle(peer_id, tunnel_id, header, body_read).await?;
                     }
                     Ok(())
                 }

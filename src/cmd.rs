@@ -1,11 +1,16 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
+use callback_result::{SingleCallbackWaiter, WaiterError};
 use num::{FromPrimitive, ToPrimitive};
-use crate::errors::CmdResult;
+use tokio::io::{AsyncReadExt, ReadBuf};
+use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
-use crate::TunnelId;
+use crate::{CmdTunnelRead, TunnelId};
 
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
@@ -42,11 +47,104 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes,
     }
 }
 
+pub struct CmdBodyRead {
+    recv: Option<Box<dyn CmdTunnelRead>>,
+    len: usize,
+    offset: usize,
+    waiter: Arc<SingleCallbackWaiter<CmdResult<Box<dyn CmdTunnelRead>>>>,
+}
+
+impl CmdBodyRead {
+    pub fn new(recv: Box<dyn CmdTunnelRead>, len: usize) -> Self {
+        Self {
+            recv: Some(recv),
+            len,
+            offset: 0,
+            waiter: Arc::new(SingleCallbackWaiter::new()),
+        }
+    }
+
+    pub async fn read_all(&mut self) -> CmdResult<Vec<u8>> {
+        if self.offset == self.len {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; self.len - self.offset];
+        let ret = self.recv.as_mut().unwrap().read_exact(&mut buf).await.map_err(into_cmd_err!(CmdErrorCode::IoError));
+        if ret.is_ok() {
+            self.offset = self.len;
+            self.waiter.set_result(Ok(self.recv.take().unwrap())).unwrap();
+            Ok(buf)
+        } else {
+            self.recv.take();
+            self.waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error"))).unwrap();
+            Err(ret.err().unwrap())
+        }
+    }
+
+    pub(crate) fn get_waiter(&self) -> Arc<SingleCallbackWaiter<CmdResult<Box<dyn CmdTunnelRead>>>> {
+        self.waiter.clone()
+    }
+}
+
+impl Drop for CmdBodyRead {
+    fn drop(&mut self) {
+        if self.recv.is_none() || self.len == self.offset {
+            return;
+        }
+        let mut recv = self.recv.take().unwrap();
+        let len = self.len - self.offset;
+        let waiter = self.waiter.clone();
+        if len == 0 {
+            waiter.set_result(Ok(recv)).unwrap();
+            return;
+        }
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; len];
+            if let Err(e) = recv.read_exact(&mut buf).await {
+                waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error {}", e))).unwrap();
+            } else {
+                waiter.set_result(Ok(recv)).unwrap();
+            }
+        });
+    }
+}
+
+impl tokio::io::AsyncRead for CmdBodyRead {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let this = Pin::into_inner(self);
+        let len = this.len - this.offset;
+        if len == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let buf = buf.initialize_unfilled();
+        let mut buf = ReadBuf::new(&mut buf[..len]);
+        let recv = Pin::new(this.recv.as_mut().unwrap());
+        let fut = recv.poll_read(cx, &mut buf);
+        match fut {
+            Poll::Ready(Ok(())) => {
+                this.offset += buf.filled().len();
+                if this.offset == this.len {
+                    this.waiter.set_result(Ok(this.recv.take().unwrap())).unwrap();
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                this.recv.take();
+                this.waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error"))).unwrap();
+                Poll::Ready(Err(e))
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+
 #[callback_trait::callback_trait]
 pub trait CmdHandler<LEN, CMD>: Send + Sync + 'static
 where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
-    async fn handle(&self, peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, buf: Vec<u8>) -> CmdResult<()>;
+    async fn handle(&self, peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, body: CmdBodyRead) -> CmdResult<()>;
 }
 
 pub(crate) struct CmdHandlerMap<LEN, CMD> {

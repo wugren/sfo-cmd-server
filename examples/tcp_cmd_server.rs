@@ -222,7 +222,7 @@ async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
     let server = DefaultCmdServer::<u16, u8, TlsConnection, _>::new(listener);
     let sender = server.clone();
-    server.register_cmd_handler(0x01, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
+    server.register_cmd_handler(0x01, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body_read| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());

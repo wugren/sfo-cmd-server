@@ -4,7 +4,7 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom
 use num::{FromPrimitive, ToPrimitive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
-use crate::{CmdTunnel, TunnelId};
+use crate::{CmdBodyRead, CmdTunnel, TunnelId};
 use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
@@ -132,22 +132,19 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                                 if n == 0 {
                                     break;
                                 }
-                                let header = CmdHeader::<LEN, CMD>::clone_from_slice(&header).unwrap();
-                                let mut buf = vec![0u8; header.pkg_len().to_u64().unwrap_or(0) as usize];
-                                if buf.len() > 0 {
-                                    let n = reader.read_exact(&mut buf).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                                    if n == 0 {
-                                        break;
+                                let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                                let cmd_read = CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
+                                let waiter = cmd_read.get_waiter();
+                                let future = waiter.create_result_future();
+                                {
+                                    let body_read = cmd_read;
+                                    if let Some(handler) = cmd_handler_map.get(header.cmd_code()) {
+                                        if let Err(e) = handler.handle(remote_id.clone(), tunnel_id, header, body_read).await {
+                                            log::error!("handle cmd error: {:?}", e);
+                                        }
                                     }
-                                }
-
-                                if let Some(handler) = cmd_handler_map.get(header.cmd_code()) {
-                                    if let Err(e) = handler.handle(remote_id.clone(), tunnel_id, header, buf).await {
-                                        log::error!("handle cmd error: {:?}", e);
-                                    }
-                                }
-                                // if let Err(e) = this.handle_cmd(tls_key.as_slice(), header, buf).await {
-                                //     log::error!("handle cmd error: {:?}", e);
+                                };
+                                reader = future.await.map_err(into_cmd_err!(CmdErrorCode::Failed))??;
                                 // }
                             }
                             Ok(())
