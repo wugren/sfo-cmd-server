@@ -85,9 +85,33 @@ where T: CmdTunnel,
         Ok(())
     }
 
+    pub async fn send2(&mut self, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let mut len = 0;
+        for b in body.iter() {
+            len += b.len();
+        }
+        let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
+        let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        let ret = self.send_inner2(buf.as_slice(), body).await;
+        if let Err(e) = ret {
+            self.set_disable();
+            return Err(e);
+        }
+        Ok(())
+    }
+
     async fn send_inner(&mut self, header: &[u8], body: &[u8]) -> CmdResult<()> {
         self.write.write_all(header).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         self.write.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        self.write.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        Ok(())
+    }
+
+    async fn send_inner2(&mut self, header: &[u8], body: &[&[u8]]) -> CmdResult<()> {
+        self.write.write_all(header).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        for b in body.iter() {
+            self.write.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        }
         self.write.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         Ok(())
     }
@@ -270,9 +294,19 @@ impl<C: WorkerClassification,
         send.send(cmd, body).await
     }
 
+    async fn send2(&self, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let mut send = self.get_send().await?;
+        send.send2(cmd, body).await
+    }
+
     async fn send_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
         send.send(cmd, body).await
+    }
+
+    async fn send2_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
+        send.send2(cmd, body).await
     }
 }
 
@@ -285,6 +319,11 @@ impl<C: WorkerClassification,
     async fn send_by_classified_tunnel(&self, classification: C, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let mut send = self.get_classified_send(classification).await?;
         send.send(cmd, body).await
+    }
+
+    async fn send2_by_classified_tunnel(&self, classification: C, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let mut send = self.get_classified_send(classification).await?;
+        send.send2(cmd, body).await
     }
 
     async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId> {

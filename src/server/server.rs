@@ -198,6 +198,31 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         Ok(())
     }
 
+    async fn send2(&self, peer_id: &PeerId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let connections = self.peer_manager.find_connections(peer_id);
+        for conn in connections {
+            let ret: CmdResult<()> = async move {
+                let mut conn = conn.lock().await;
+                let mut len = 0;
+                for b in body.iter() {
+                    len += b.len();
+                }
+                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
+                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                for b in body.iter() {
+                    conn.send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                }
+                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                Ok(())
+            }.await;
+            if ret.is_ok() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     async fn send_by_specify_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let conn = self.peer_manager.find_connection(tunnel_id);
         if conn.is_none() {
@@ -213,6 +238,27 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         Ok(())
     }
 
+    async fn send2_by_specify_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let conn = self.peer_manager.find_connection(tunnel_id);
+        if conn.is_none() {
+            return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
+        }
+        let conn = conn.unwrap();
+        let mut conn = conn.lock().await;
+        let mut len = 0;
+        for b in body.iter() {
+            len += b.len();
+        }
+        let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
+        let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        for b in body.iter() {
+            conn.send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        }
+        conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        Ok(())
+    }
+
     async fn send_by_all_tunnels(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
@@ -222,6 +268,28 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 conn.send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                Ok(())
+            }.await;
+        }
+        Ok(())
+    }
+
+    async fn send2_by_all_tunnels(&self, peer_id: &PeerId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+        let connections = self.peer_manager.find_connections(peer_id);
+        let mut len = 0;
+        for b in body.iter() {
+            len += b.len();
+        }
+        for conn in connections {
+            let _ret: CmdResult<()> = async move {
+                let mut conn = conn.lock().await;
+                let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
+                let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                for b in body.iter() {
+                    conn.send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                }
                 conn.send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 Ok(())
             }.await;
