@@ -72,11 +72,11 @@ impl CmdBodyRead {
         let ret = self.recv.as_mut().unwrap().read_exact(&mut buf).await.map_err(into_cmd_err!(CmdErrorCode::IoError));
         if ret.is_ok() {
             self.offset = self.len;
-            self.waiter.set_result(Ok(self.recv.take().unwrap())).unwrap();
+            self.waiter.set_result_with_cache(Ok(self.recv.take().unwrap()));
             Ok(buf)
         } else {
             self.recv.take();
-            self.waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error"))).unwrap();
+            self.waiter.set_result_with_cache(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
             Err(ret.err().unwrap())
         }
     }
@@ -95,16 +95,16 @@ impl Drop for CmdBodyRead {
         let len = self.len - self.offset;
         let waiter = self.waiter.clone();
         if len == 0 {
-            waiter.set_result(Ok(recv)).unwrap();
+            waiter.set_result_with_cache(Ok(recv));
             return;
         }
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; len];
             if let Err(e) = recv.read_exact(&mut buf).await {
-                waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error {}", e))).unwrap();
+                waiter.set_result_with_cache(Err(cmd_err!(CmdErrorCode::IoError, "read body error {}", e)));
             } else {
-                waiter.set_result(Ok(recv)).unwrap();
+                waiter.set_result_with_cache(Ok(recv));
             }
         });
     }
@@ -125,13 +125,13 @@ impl tokio::io::AsyncRead for CmdBodyRead {
             Poll::Ready(Ok(())) => {
                 this.offset += buf.filled().len();
                 if this.offset == this.len {
-                    this.waiter.set_result(Ok(this.recv.take().unwrap())).unwrap();
+                    this.waiter.set_result_with_cache(Ok(this.recv.take().unwrap()));
                 }
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
                 this.recv.take();
-                this.waiter.set_result(Err(cmd_err!(CmdErrorCode::IoError, "read body error"))).unwrap();
+                this.waiter.set_result_with_cache(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
                 Poll::Ready(Err(e))
             },
             Poll::Pending => Poll::Pending,
