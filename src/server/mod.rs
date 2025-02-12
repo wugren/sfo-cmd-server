@@ -10,7 +10,7 @@ use crate::errors::CmdResult;
 
 #[async_trait::async_trait]
 pub trait CmdServer<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash>: 'static + Send + Sync {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>);
     async fn send(&self, peer_id: &PeerId, cmd: CMD, body: &[u8]) -> CmdResult<()>;
     async fn send2(&self, peer_id: &PeerId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()>;
