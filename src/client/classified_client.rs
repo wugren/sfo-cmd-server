@@ -1,8 +1,8 @@
 use std::hash::Hash;
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
-use sfo_pool::{into_pool_err, pool_err, ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, Worker, WorkerClassification};
+use sfo_pool::{into_pool_err, pool_err, ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, WorkerClassification};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -156,7 +156,7 @@ where T: CmdTunnel,
     }
 }
 
-pub struct CmdWriteFactory<C: WorkerClassification,
+struct CmdWriteFactory<C: WorkerClassification,
     T: ClassifiedCmdTunnel<C>,
     F: ClassifiedCmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
@@ -164,14 +164,16 @@ pub struct CmdWriteFactory<C: WorkerClassification,
     tunnel_factory: F,
     cmd_handler: Arc<dyn CmdHandler<LEN, CMD>>,
     tunnel_id_generator: TunnelIdGenerator,
-    _p: std::marker::PhantomData<(C, T)>,
+    _p: std::marker::PhantomData<Mutex<(C, T)>>,
 }
 
-impl<C: WorkerClassification,
+impl<
+    C: WorkerClassification,
     T: ClassifiedCmdTunnel<C>,
     F: ClassifiedCmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> CmdWriteFactory<C, T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static
+> CmdWriteFactory<C, T, F, LEN, CMD> {
     pub fn new(tunnel_factory: F, cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
         Self {
             tunnel_factory,
@@ -187,7 +189,8 @@ impl<C: WorkerClassification,
     T: ClassifiedCmdTunnel<C>,
     F: ClassifiedCmdTunnelFactory<C, T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> ClassifiedWorkerFactory<CmdClientTunnelClassification<C>, ClassifiedCmdSend<T, C, LEN, CMD>> for CmdWriteFactory<C, T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> ClassifiedWorkerFactory<CmdClientTunnelClassification<C>, ClassifiedCmdSend<T, C, LEN, CMD>
+> for CmdWriteFactory<C, T, F, LEN, CMD> {
     async fn create(&self, classification: Option<CmdClientTunnelClassification<C>>) -> PoolResult<ClassifiedCmdSend<T, C, LEN, CMD>> {
         if classification.is_some() && classification.as_ref().unwrap().tunnel_id.is_some() {
             return Err(pool_err!(PoolErrorCode::Failed, "tunnel {:?} not found", classification.as_ref().unwrap().tunnel_id.unwrap()));

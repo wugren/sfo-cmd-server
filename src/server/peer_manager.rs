@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::{peer_id, CmdTunnel};
+use crate::{CmdTunnel};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
 use crate::server::CmdServerEventListener;

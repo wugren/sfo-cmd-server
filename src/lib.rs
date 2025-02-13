@@ -10,6 +10,5 @@ mod tunnel;
 pub use tunnel::*;
 pub use cmd::*;
 pub use peer_id::*;
-pub use tunnel::*;
 pub use tunnel_id::*;
 pub use sfo_pool::*;

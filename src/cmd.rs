@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
-use callback_result::{SingleCallbackWaiter, WaiterError};
+use callback_result::{SingleCallbackWaiter};
 use num::{FromPrimitive, ToPrimitive};
 use tokio::io::{AsyncReadExt, ReadBuf};
 use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
