@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
@@ -172,7 +173,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
 
 #[async_trait::async_trait]
 impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash + Debug,
     T: CmdTunnel,
     LISTENER: CmdTunnelListener<T>> CmdServer<LEN, CMD> for DefaultCmdServer<LEN, CMD, T, LISTENER> {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
@@ -184,6 +185,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         for conn in connections {
             let ret: CmdResult<()> = async move {
                 let mut conn = conn.lock().await;
+                log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
                 let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -206,7 +208,9 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                 let mut len = 0;
                 for b in body.iter() {
                     len += b.len();
+                    log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
                 }
+                log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
                 let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -223,13 +227,15 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         Ok(())
     }
 
-    async fn send_by_specify_tunnel(&self, _peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+    async fn send_by_specify_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[u8]) -> CmdResult<()> {
         let conn = self.peer_manager.find_connection(tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
         }
         let conn = conn.unwrap();
         let mut conn = conn.lock().await;
+        assert_eq!(tunnel_id, conn.conn_id);
+        log::trace!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
         let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -238,17 +244,20 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         Ok(())
     }
 
-    async fn send2_by_specify_tunnel(&self, _peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
+    async fn send2_by_specify_tunnel(&self, peer_id: &PeerId, tunnel_id: TunnelId, cmd: CMD, body: &[&[u8]]) -> CmdResult<()> {
         let conn = self.peer_manager.find_connection(tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
         }
         let conn = conn.unwrap();
         let mut conn = conn.lock().await;
+        assert_eq!(tunnel_id, conn.conn_id);
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
+            log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
         }
+        log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
         let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         conn.send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;

@@ -42,7 +42,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fro
 impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes> RawFixedBytes for CmdHeader<LEN, CMD> {
     fn raw_bytes() -> Option<usize> {
-        Some(LEN::raw_bytes().unwrap() + u8::raw_bytes().unwrap())
+        Some(LEN::raw_bytes().unwrap() + CMD::raw_bytes().unwrap())
     }
 }
 

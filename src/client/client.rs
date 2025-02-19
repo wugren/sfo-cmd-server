@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::{Arc};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
@@ -20,7 +21,7 @@ pub trait CmdTunnelFactory<T: CmdTunnel>: Send + Sync + 'static {
 pub struct CmdSend<T, LEN, CMD>
 where T: CmdTunnel,
       LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug {
     recv_handle: JoinHandle<CmdResult<()>>,
     write: Box<dyn CmdTunnelWrite>,
     is_work: bool,
@@ -33,7 +34,7 @@ where T: CmdTunnel,
 impl<T, LEN, CMD> CmdSend<T, LEN, CMD>
 where T: CmdTunnel,
       LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug {
     pub fn new(tunnel_id: TunnelId, tunnel: Arc<T>, recv_handle: JoinHandle<CmdResult<()>>, write: Box<dyn CmdTunnelWrite>) -> Self {
         Self {
             recv_handle,
@@ -55,6 +56,7 @@ where T: CmdTunnel,
     }
 
     pub async fn send(&mut self, cmd: CMD, body: &[u8]) -> CmdResult<()> {
+        log::trace!("client {:?} send cmd: {:?}, len: {} data:{}", self.tunnel_id, cmd, body.len(), hex::encode(body));
         let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(body.len() as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         let ret = self.send_inner(buf.as_slice(), body).await;
@@ -69,7 +71,9 @@ where T: CmdTunnel,
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
+            log::trace!("client {:?} send2 cmd: {:?}, data {}", self.tunnel_id, cmd, hex::encode(b));
         }
+        log::trace!("client {:?} send2 cmd: {:?}, len {}", self.tunnel_id, cmd, len);
         let header = CmdHeader::<LEN, CMD>::new(cmd, LEN::from_u64(len as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         let ret = self.send_inner2(buf.as_slice(), body).await;
@@ -100,7 +104,7 @@ where T: CmdTunnel,
 impl<T, LEN, CMD> Drop for CmdSend<T, LEN, CMD>
 where T: CmdTunnel,
       LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static {
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug {
     fn drop(&mut self) {
         self.set_disable();
     }
@@ -109,7 +113,7 @@ where T: CmdTunnel,
 impl<T, LEN, CMD> ClassifiedWorker<TunnelId> for CmdSend<T, LEN, CMD>
 where T: CmdTunnel,
       LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static{
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug{
     fn is_work(&self) -> bool {
         self.is_work && !self.recv_handle.is_finished()
     }
@@ -127,7 +131,7 @@ where T: CmdTunnel,
 struct CmdWriteFactory<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug> {
     tunnel_factory: F,
     cmd_handler: Arc<dyn CmdHandler<LEN, CMD>>,
     tunnel_id_generator: TunnelIdGenerator,
@@ -137,7 +141,7 @@ struct CmdWriteFactory<T: CmdTunnel,
 impl<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> CmdWriteFactory<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug> CmdWriteFactory<T, F, LEN, CMD> {
     pub fn new(tunnel_factory: F, cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
         Self {
             tunnel_factory,
@@ -152,7 +156,7 @@ impl<T: CmdTunnel,
 impl<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes> ClassifiedWorkerFactory<TunnelId, CmdSend<T, LEN, CMD>> for CmdWriteFactory<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Debug> ClassifiedWorkerFactory<TunnelId, CmdSend<T, LEN, CMD>> for CmdWriteFactory<T, F, LEN, CMD> {
     async fn create(&self, c: Option<TunnelId>) -> PoolResult<CmdSend<T, LEN, CMD>> {
         if c.is_some() {
             return Err(pool_err!(PoolErrorCode::Failed, "tunnel {:?} not found", c.unwrap()));
@@ -171,6 +175,7 @@ impl<T: CmdTunnel,
                         break;
                     }
                     let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    log::trace!("recv cmd {:?} from {} len {}", header.cmd_code(), peer_id.to_base58(), header.pkg_len().to_u64().unwrap());
                     let cmd_read = CmdBodyRead::new(recv, header.pkg_len().to_u64().unwrap() as usize);
                     let waiter = cmd_read.get_waiter();
                     let future = waiter.create_result_future();
@@ -190,7 +195,7 @@ impl<T: CmdTunnel,
 pub struct DefaultCmdClient<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug> {
     tunnel_pool: ClassifiedWorkerPoolRef<TunnelId, CmdSend<T, LEN, CMD>, CmdWriteFactory<T, F, LEN, CMD>>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
@@ -198,7 +203,7 @@ pub struct DefaultCmdClient<T: CmdTunnel,
 impl<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> DefaultCmdClient<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug> DefaultCmdClient<T, F, LEN, CMD> {
     pub fn new(factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
@@ -229,7 +234,7 @@ impl<T: CmdTunnel,
 impl<T: CmdTunnel,
     F: CmdTunnelFactory<T>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash> CmdClient<LEN, CMD> for DefaultCmdClient<T, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug> CmdClient<LEN, CMD> for DefaultCmdClient<T, F, LEN, CMD> {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
         self.cmd_handler_map.insert(cmd, handler);
     }
