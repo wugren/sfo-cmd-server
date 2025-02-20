@@ -17,6 +17,8 @@ callback-trait = "0.1.3"
 callback-result = "0.1.4"
 hex = "0.4.3"
 base-x = "0.2.11"
+as-any = "0.3.1"
+sfo-split = "0.1.2"
 
 [dev-dependencies]
 rustls = { version = "0.23.20", default-features = false, features = ["ring", "std"] }

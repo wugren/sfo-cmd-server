@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::{CmdTunnel};
+use crate::{CmdTunnelRead, CmdTunnelWrite};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
 use crate::server::CmdServerEventListener;
@@ -11,17 +11,17 @@ pub struct CachedPeerInfo {
     pub conn_list: Vec<TunnelId>,
 }
 
-pub struct PeerManager<T: CmdTunnel> {
-    conn_cache: Mutex<HashMap<TunnelId, (PeerId, Arc<tokio::sync::Mutex<PeerConnection<T>>>)>>,
+pub struct PeerManager<R: CmdTunnelRead, W: CmdTunnelWrite> {
+    conn_cache: Mutex<HashMap<TunnelId, (PeerId, Arc<tokio::sync::Mutex<PeerConnection<R, W>>>)>>,
     device_conn_map: Mutex<HashMap<PeerId, CachedPeerInfo>>,
     conn_id_generator: TunnelIdGenerator,
     listener: Arc<dyn CmdServerEventListener>,
 }
-pub type PeerManagerRef<T> = Arc<PeerManager<T>>;
+pub type PeerManagerRef<R, W> = Arc<PeerManager<R, W>>;
 
 
-impl<T: CmdTunnel> PeerManager<T> {
-    pub fn new(listener: Arc<dyn CmdServerEventListener>) -> PeerManagerRef<T> {
+impl<R: CmdTunnelRead, W: CmdTunnelWrite> PeerManager<R, W> {
+    pub fn new(listener: Arc<dyn CmdServerEventListener>) -> PeerManagerRef<R, W> {
         Arc::new(PeerManager {
             conn_cache: Mutex::new(HashMap::new()),
             device_conn_map: Mutex::new(HashMap::new()),
@@ -34,7 +34,7 @@ impl<T: CmdTunnel> PeerManager<T> {
         self.conn_id_generator.generate()
     }
 
-    pub async fn add_peer_connection(self: &Arc<Self>, mut conn: PeerConnection<T>) {
+    pub async fn add_peer_connection(self: &Arc<Self>, mut conn: PeerConnection<R, W>) {
         let recv_handle = conn.handle.take().unwrap();
         let peer_id = conn.peer_id.clone();
         let conn_id = conn.conn_id;
@@ -76,12 +76,12 @@ impl<T: CmdTunnel> PeerManager<T> {
         }
     }
 
-    pub fn find_connection(&self, conn_id: TunnelId) -> Option<Arc<tokio::sync::Mutex<PeerConnection<T>>>> {
+    pub fn find_connection(&self, conn_id: TunnelId) -> Option<Arc<tokio::sync::Mutex<PeerConnection<R, W>>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         conn_cache.get(&conn_id).map(|c| c.1.clone())
     }
 
-    pub fn find_connections(&self, device_id: &PeerId) -> Vec<Arc<tokio::sync::Mutex<PeerConnection<T>>>> {
+    pub fn find_connections(&self, device_id: &PeerId) -> Vec<Arc<tokio::sync::Mutex<PeerConnection<R, W>>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         let device_conn_map = self.device_conn_map.lock().unwrap();
         device_conn_map.get(device_id).map(|conns| {

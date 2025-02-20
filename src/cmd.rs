@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use callback_result::{SingleCallbackWaiter};
 use num::{FromPrimitive, ToPrimitive};
-use tokio::io::{AsyncReadExt, ReadBuf};
+use sfo_split::RHalf;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
-use crate::{CmdTunnelRead, TunnelId};
+use crate::{TunnelId};
 
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
@@ -46,15 +48,21 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes,
     }
 }
 
-pub struct CmdBodyRead {
-    recv: Option<Box<dyn CmdTunnelRead>>,
+#[async_trait::async_trait]
+pub trait CmdBodyReadAll: tokio::io::AsyncRead + Send + 'static {
+    async fn read_all(&mut self) -> CmdResult<Vec<u8>>;
+}
+pub type CmdBodyRead = Box<dyn CmdBodyReadAll>;
+
+pub(crate) struct CmdBodyReadImpl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> {
+    recv: Option<RHalf<R, W>>,
     len: usize,
     offset: usize,
-    waiter: Arc<SingleCallbackWaiter<CmdResult<Box<dyn CmdTunnelRead>>>>,
+    waiter: Arc<SingleCallbackWaiter<CmdResult<RHalf<R, W>>>>,
 }
 
-impl CmdBodyRead {
-    pub fn new(recv: Box<dyn CmdTunnelRead>, len: usize) -> Self {
+impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> CmdBodyReadImpl<R, W> {
+    pub fn new(recv: RHalf<R, W>, len: usize) -> Self {
         Self {
             recv: Some(recv),
             len,
@@ -63,7 +71,15 @@ impl CmdBodyRead {
         }
     }
 
-    pub async fn read_all(&mut self) -> CmdResult<Vec<u8>> {
+
+    pub(crate) fn get_waiter(&self) -> Arc<SingleCallbackWaiter<CmdResult<RHalf<R, W>>>> {
+        self.waiter.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> CmdBodyReadAll for CmdBodyReadImpl<R, W> {
+    async fn read_all(&mut self) -> CmdResult<Vec<u8>> {
         if self.offset == self.len {
             return Ok(Vec::new());
         }
@@ -79,13 +95,9 @@ impl CmdBodyRead {
             Err(ret.err().unwrap())
         }
     }
-
-    pub(crate) fn get_waiter(&self) -> Arc<SingleCallbackWaiter<CmdResult<Box<dyn CmdTunnelRead>>>> {
-        self.waiter.clone()
-    }
 }
 
-impl Drop for CmdBodyRead {
+impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> Drop for CmdBodyReadImpl<R, W> {
     fn drop(&mut self) {
         if self.recv.is_none() || self.len == self.offset {
             return;
@@ -109,7 +121,7 @@ impl Drop for CmdBodyRead {
     }
 }
 
-impl tokio::io::AsyncRead for CmdBodyRead {
+impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> tokio::io::AsyncRead for CmdBodyReadImpl<R, W> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         let this = Pin::into_inner(self);
         let len = this.len - this.offset;
@@ -118,7 +130,7 @@ impl tokio::io::AsyncRead for CmdBodyRead {
         }
         let buf = buf.initialize_unfilled();
         let mut buf = ReadBuf::new(&mut buf[..len]);
-        let recv = Pin::new(this.recv.as_mut().unwrap());
+        let recv = Pin::new(this.recv.as_mut().unwrap().deref_mut());
         let fut = recv.poll_read(cx, &mut buf);
         match fut {
             Poll::Ready(Ok(())) => {

@@ -1,14 +1,12 @@
-use std::sync::Arc;
+use sfo_split::WHalf;
 use tokio::task::JoinHandle;
-use crate::{CmdTunnel, CmdTunnelWrite};
 use crate::errors::CmdResult;
 use crate::peer_id::PeerId;
 use crate::tunnel_id::TunnelId;
 
-pub struct PeerConnection<T: CmdTunnel> {
+pub struct PeerConnection<R, W> {
     pub conn_id: TunnelId,
     pub peer_id: PeerId,
-    pub tunnel: Arc<T>,
-    pub send: Box<dyn CmdTunnelWrite>,
+    pub send: WHalf<R, W>,
     pub handle: Option<JoinHandle<CmdResult<()>>>,
 }

@@ -3,9 +3,10 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
+use sfo_split::Splittable;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::cmd::{CmdHandler, CmdHandlerMap, CmdHeader};
-use crate::{CmdBodyRead, CmdTunnel, TunnelId};
+use crate::cmd::{CmdBodyReadImpl, CmdHandler, CmdHandlerMap, CmdHeader};
+use crate::{CmdTunnelRead, CmdTunnelWrite, TunnelId};
 use crate::errors::{cmd_err, into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
@@ -13,8 +14,8 @@ use crate::server::CmdServer;
 use super::peer_manager::{PeerManager, PeerManagerRef};
 
 #[async_trait::async_trait]
-pub trait CmdTunnelListener<T: CmdTunnel>: Send + Sync + 'static {
-    async fn accept(&self) -> CmdResult<Arc<T>>;
+pub trait CmdTunnelListener<R: CmdTunnelRead, W: CmdTunnelWrite>: Send + Sync + 'static {
+    async fn accept(&self) -> CmdResult<Splittable<R, W>>;
 }
 
 #[async_trait::async_trait]
@@ -67,18 +68,19 @@ impl CmdServerEventListener for CmdServerEventListenerEmit {
     }
 }
 
-pub struct DefaultCmdServer<LEN, CMD, T: CmdTunnel, LISTENER> {
+pub struct DefaultCmdServer<R: CmdTunnelRead, W: CmdTunnelWrite, LEN, CMD, LISTENER> {
     tunnel_listener: LISTENER,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
-    peer_manager: PeerManagerRef<T>,
+    peer_manager: PeerManagerRef<R, W>,
     event_emit: CmdServerEventListenerEmit,
-    _l: std::marker::PhantomData<(LEN, CMD, T)>,
+    _l: Mutex<std::marker::PhantomData<(R, W, LEN, CMD)>>,
 }
 
-impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
+impl<R: CmdTunnelRead,
+    W: CmdTunnelWrite,
+    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
-    T: CmdTunnel,
-    LISTENER: CmdTunnelListener<T>> DefaultCmdServer<LEN, CMD, T, LISTENER> {
+    LISTENER: CmdTunnelListener<R, W>> DefaultCmdServer<R, W, LEN, CMD, LISTENER> {
     pub fn new(tunnel_listener: LISTENER) -> Arc<Self> {
         let event_emit = CmdServerEventListenerEmit::new();
         Arc::new(Self {
@@ -94,14 +96,9 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
         self.event_emit.attach_event_listener(event_listener);
     }
 
-    pub async fn get_peer_tunnels(&self, peer_id: &PeerId) -> Vec<Arc<T>> {
+    pub async fn get_peer_tunnels(&self, peer_id: &PeerId) -> Vec<Arc<tokio::sync::Mutex<PeerConnection<R, W>>>> {
         let connections = self.peer_manager.find_connections(peer_id);
-        let mut tunnels = Vec::new();
-        for conn in connections {
-            let conn = conn.lock().await;
-            tunnels.push(conn.tunnel.clone());
-        }
-        tunnels
+        connections
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -124,7 +121,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                 let ret: CmdResult<()> = async move {
                     let this = this.clone();
                     let cmd_handler_map = this.cmd_handler_map.clone();
-                    let (mut reader, writer) = tunnel.split()?;
+                    let (mut reader, writer) = tunnel.split();
                     let recv_handle = tokio::spawn(async move {
                         let ret: CmdResult<()> = async move {
                             loop {
@@ -134,7 +131,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                                     break;
                                 }
                                 let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                                let cmd_read = CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
+                                let cmd_read = Box::new(CmdBodyReadImpl::new(reader, header.pkg_len().to_u64().unwrap() as usize));
                                 let waiter = cmd_read.get_waiter();
                                 let future = waiter.create_result_future();
                                 {
@@ -156,7 +153,6 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
                     let peer_conn = PeerConnection {
                         conn_id: tunnel_id,
                         peer_id: peer_id.clone(),
-                        tunnel,
                         send: writer,
                         handle: Some(recv_handle),
                     };
@@ -172,10 +168,11 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send
 }
 
 #[async_trait::async_trait]
-impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
+impl<R: CmdTunnelRead,
+    W: CmdTunnelWrite,
+    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash + Debug,
-    T: CmdTunnel,
-    LISTENER: CmdTunnelListener<T>> CmdServer<LEN, CMD> for DefaultCmdServer<LEN, CMD, T, LISTENER> {
+    LISTENER: CmdTunnelListener<R, W>> CmdServer<LEN, CMD> for DefaultCmdServer<R, W, LEN, CMD, LISTENER> {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
         self.cmd_handler_map.insert(cmd, handler);
     }

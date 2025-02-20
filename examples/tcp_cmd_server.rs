@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use as_any::AsAny;
 use rcgen::{generate_simple_self_signed};
 use rustls::crypto::{ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -15,31 +16,18 @@ use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use rustls::pki_types::pem::PemObject;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use sha2::Digest;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{split, AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
 
 struct TlsStreamRead {
+    remote_id: PeerId,
     read: Option<tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamRead {
-    pub fn new(read: tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>) -> Self {
-        Self { read: Some(read) }
-    }
-
-    pub fn take(&mut self) -> Option<tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>> {
-        self.read.take()
-    }
-}
-
-impl CmdTunnelRead for TlsStreamRead {
-    fn get_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get_any_mut(&mut self) -> &mut dyn Any {
-        self
+    pub fn new(remote_id: PeerId, read: tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>) -> Self {
+        Self { remote_id, read: Some(read) }
     }
 }
 
@@ -54,27 +42,21 @@ impl AsyncRead for TlsStreamRead {
     }
 }
 
+
+impl CmdTunnelRead for TlsStreamRead {
+    fn get_remote_peer_id(&self) -> PeerId {
+        self.remote_id.clone()
+    }
+}
+
 struct TlsStreamWrite {
+    remote_id: PeerId,
     write: Option<tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamWrite {
-    pub fn new(write: tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>) -> Self {
-        Self { write: Some(write) }
-    }
-
-    pub fn take(&mut self) -> Option<tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>> {
-        self.write.take()
-    }
-}
-
-impl CmdTunnelWrite for TlsStreamWrite {
-    fn get_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get_any_mut(&mut self) -> &mut dyn Any {
-        self
+    pub fn new(remote_id: PeerId, write: tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>) -> Self {
+        Self { remote_id, write: Some(write) }
     }
 }
 
@@ -107,46 +89,9 @@ impl AsyncWrite for TlsStreamWrite {
     }
 }
 
-struct TlsConnection {
-    tls_key: Vec<u8>,
-    stream: Mutex<Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
-}
-
-impl TlsConnection {
-    pub fn new(stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Self {
-        let tls_key = stream.get_ref().1.peer_certificates().unwrap().get(0).unwrap().to_vec();
-        Self { tls_key, stream: Mutex::new(Some(stream)) }
-    }
-}
-
-#[async_trait::async_trait]
-impl CmdTunnel for TlsConnection {
+impl CmdTunnelWrite for TlsStreamWrite {
     fn get_remote_peer_id(&self) -> PeerId {
-        let mut sha256 = sha2::Sha256::new();
-        sha256.update(self.tls_key.as_slice());
-        PeerId::from(sha256.finalize().as_slice().to_vec())
-    }
-
-    fn split(&self) -> CmdResult<(Box<dyn CmdTunnelRead>, Box<dyn CmdTunnelWrite>)> {
-        let stream = self.stream.lock().unwrap().take().unwrap();
-        let (read, write) = tokio::io::split(stream);
-        Ok((Box::new(TlsStreamRead::new(read)), Box::new(TlsStreamWrite::new(write))))
-    }
-
-    fn unsplit(&self, mut read: Box<dyn CmdTunnelRead>, mut write: Box<dyn CmdTunnelWrite>) -> CmdResult<()> {
-        let mut socket = self.stream.lock().unwrap();
-        let read = unsafe { std::mem::transmute::<_, &mut dyn Any>(read.get_any_mut())};
-        if let Some(read) = read.downcast_mut::<TlsStreamRead>() {
-            if let Some(read) = read.take() {
-                let write = unsafe { std::mem::transmute::<_, &mut dyn Any>(write.get_any_mut())};
-                if let Some(write) = write.downcast_mut::<TlsStreamWrite>() {
-                    if let Some(write) = write.take() {
-                        *socket = Some(read.unsplit(write));
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.remote_id.clone()
     }
 }
 
@@ -209,24 +154,29 @@ impl TunnelListener {
     }
 }
 #[async_trait::async_trait]
-impl CmdTunnelListener<TlsConnection> for TunnelListener {
-    async fn accept(&self) -> sfo_cmd_server::errors::CmdResult<Arc<TlsConnection>> {
+impl CmdTunnelListener<TlsStreamRead, TlsStreamWrite> for TunnelListener {
+    async fn accept(&self) -> sfo_cmd_server::errors::CmdResult<CmdTunnel<TlsStreamRead, TlsStreamWrite>> {
         let (stream, _) = self.tcp_listener.accept().await.map_err(into_cmd_err!(CmdErrorCode::IoError, "accept failed"))?;
         let tls_stream = self.tls_acceptor.accept(stream).await.map_err(into_cmd_err!(CmdErrorCode::TlsError, "tls accept failed"))?;
-        Ok(Arc::new(TlsConnection::new(tls_stream)))
+        let tls_key = tls_stream.get_ref().1.peer_certificates().unwrap().get(0).unwrap().to_vec();
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(tls_key.as_slice());
+        let peer_id = PeerId::from(sha256.finalize().as_slice().to_vec());
+        let (r, w) = split(tls_stream);
+        Ok(CmdTunnel::new(TlsStreamRead::new(peer_id.clone(), r), TlsStreamWrite::new(peer_id, w)))
     }
 }
 
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = DefaultCmdServer::<u16, u8, TlsConnection, _>::new(listener);
+    let server = DefaultCmdServer::<TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener);
     let sender = server.clone();
     server.register_cmd_handler(0x01, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body_read| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());
-            sender.send(&peer_id, 0x02, vec![].as_slice()).await
+            sender.send(&peer_id, 0x02, "server".as_bytes()).await
         }
     });
     server.start();

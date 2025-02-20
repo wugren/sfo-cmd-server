@@ -48,6 +48,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "as-any"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
+
+[[package]]
 name = "async-channel"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1545,6 +1551,7 @@ dependencies = [
 name = "sfo-cmd-server"
 version = "0.1.0"
 dependencies = [
+ "as-any",
  "async-trait",
  "base-x",
  "base58",
@@ -1558,6 +1565,7 @@ dependencies = [
  "rustls",
  "sfo-pool",
  "sfo-result",
+ "sfo-split",
  "sha2",
  "tokio",
  "tokio-rustls",
@@ -1580,6 +1588,12 @@ name = "sfo-result"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12256febb90f624bf25a5eeaed19e74b78a1348c5883aaecb5bd418c41b2f729"
+
+[[package]]
+name = "sfo-split"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9fc89a2044707286d9adfeb1af07ec49c3568514d6deeae83b8bca1c4032f21"
 
 [[package]]
 name = "sha2"
