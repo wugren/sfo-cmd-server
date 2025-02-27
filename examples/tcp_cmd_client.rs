@@ -183,7 +183,7 @@ async fn main() {
         }
     });
 
-    client.send(0x01, "client".as_bytes()).await.unwrap();
+    client.send(0x01, 0, "client".as_bytes()).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 }

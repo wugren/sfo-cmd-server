@@ -176,7 +176,7 @@ async fn main() {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());
-            sender.send(&peer_id, 0x02, "server".as_bytes()).await
+            sender.send(&peer_id, 0x02, 0, "server".as_bytes()).await
         }
     });
     server.start();

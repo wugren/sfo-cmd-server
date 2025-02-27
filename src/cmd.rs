@@ -16,20 +16,26 @@ use crate::{TunnelId};
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
     pkg_len: LEN,
+    version: u8,
     cmd_code: CMD,
 }
 
 impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static> CmdHeader<LEN, CMD> {
-    pub fn new(cmd_code: CMD, pkg_len: LEN) -> Self {
+    pub fn new(version: u8, cmd_code: CMD, pkg_len: LEN) -> Self {
         Self {
             pkg_len,
+            version,
             cmd_code,
         }
     }
 
     pub fn pkg_len(&self) -> LEN {
         self.pkg_len
+    }
+
+    pub fn version(&self) -> u8 {
+        self.version
     }
 
     pub fn cmd_code(&self) -> CMD {
@@ -44,7 +50,7 @@ impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fro
 impl<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes> RawFixedBytes for CmdHeader<LEN, CMD> {
     fn raw_bytes() -> Option<usize> {
-        Some(LEN::raw_bytes().unwrap() + CMD::raw_bytes().unwrap())
+        Some(LEN::raw_bytes().unwrap() + u8::raw_bytes().unwrap() + CMD::raw_bytes().unwrap())
     }
 }
 
