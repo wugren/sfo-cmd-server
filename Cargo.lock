@@ -313,7 +313,8 @@ dependencies = [
 [[package]]
 name = "bucky-error"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-error.git#0573f641ef85a15c5d370144dead70b148fec9e7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66145f6051ce4211a79f770bf770ee6e81de69114afac5d3b7d0dc07a40825"
 dependencies = [
  "int-enum",
  "log",
@@ -324,7 +325,8 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50665e5a0ab0208acc7d78af4a904a077d27e578f78a0d97ca13a0586ae020e7"
 dependencies = [
  "bucky-error",
  "bucky-raw-codec-derive",
@@ -341,7 +343,8 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec-derive"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27d7f1916a4d1c424b7e8feb1b2b182acf0a64ba47fa1c1a845bd04e2f34e563"
 dependencies = [
  "proc-macro2",
  "quote",

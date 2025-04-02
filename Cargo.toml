@@ -10,7 +10,7 @@ license-file = "LISENCE"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1.86"
 sfo-result = "0.2.6"
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
+bucky-raw-codec = {version = "0.1", features = ["derive"]}
 log = "0.4.25"
 sha2 = "0.10.8"
 num = "0.4.3"
