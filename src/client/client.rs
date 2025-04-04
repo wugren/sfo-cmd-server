@@ -22,10 +22,10 @@ pub trait CmdTunnelFactory<R: CmdTunnelRead, W: CmdTunnelWrite>: Send + Sync + '
 pub struct CmdSend<R: CmdTunnelRead, W: CmdTunnelWrite, LEN, CMD>
 where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug {
-    recv_handle: JoinHandle<CmdResult<()>>,
-    write: WHalf<R, W>,
-    is_work: bool,
-    tunnel_id: TunnelId,
+    pub(crate) recv_handle: JoinHandle<CmdResult<()>>,
+    pub(crate) write: WHalf<R, W>,
+    pub(crate) is_work: bool,
+    pub(crate) tunnel_id: TunnelId,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 
 }

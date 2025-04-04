@@ -52,11 +52,11 @@ where
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug,
 {
-    recv_handle: JoinHandle<CmdResult<()>>,
-    write: ClassifiedCmdTunnelWHalf<R, W>,
-    is_work: bool,
-    classification: C,
-    tunnel_id: TunnelId,
+    pub(crate) recv_handle: JoinHandle<CmdResult<()>>,
+    pub(crate) write: ClassifiedCmdTunnelWHalf<R, W>,
+    pub(crate) is_work: bool,
+    pub(crate) classification: C,
+    pub(crate) tunnel_id: TunnelId,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 
 }

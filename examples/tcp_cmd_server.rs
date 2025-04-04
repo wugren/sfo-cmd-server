@@ -1,9 +1,7 @@
-use std::any::Any;
 use std::fmt::Debug;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::task::{Context, Poll};
-use as_any::AsAny;
 use rcgen::{generate_simple_self_signed};
 use rustls::crypto::{ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -111,15 +109,15 @@ impl ClientCertVerifier for TlsClientCertVerifier {
         self.subjects.as_slice()
     }
 
-    fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, intermediates: &[CertificateDer<'_>], now: UnixTime) -> Result<ClientCertVerified, Error> {
+    fn verify_client_cert(&self, _end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, Error> {
         Ok(ClientCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
+    fn verify_tls12_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
+    fn verify_tls13_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
@@ -172,7 +170,7 @@ async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
     let server = DefaultCmdServer::<TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener);
     let sender = server.clone();
-    server.register_cmd_handler(0x01, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body_read| {
+    server.register_cmd_handler(0x01, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body_read| {
         let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());
