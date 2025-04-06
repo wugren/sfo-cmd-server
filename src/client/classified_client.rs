@@ -336,6 +336,10 @@ impl<C: WorkerClassification,
         let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
         send.send2(cmd, version, body).await
     }
+
+    async fn clear_all_tunnel(&self) {
+        self.tunnel_pool.clear_all_worker().await;
+    }
 }
 
 #[async_trait::async_trait]

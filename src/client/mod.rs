@@ -20,6 +20,7 @@ pub trait CmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedByte
     async fn send2(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
     async fn send_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
     async fn send2_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
+    async fn clear_all_tunnel(&self);
 }
 
 #[async_trait::async_trait]

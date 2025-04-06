@@ -281,4 +281,8 @@ impl<R: CmdTunnelRead,
         let mut send = self.get_send_of_tunnel_id(peer_id.clone(), tunnel_id).await?;
         send.send2(cmd, version, body).await
     }
+
+    async fn clear_all_tunnel(&self) {
+        self.tunnel_pool.clear_all_worker().await
+    }
 }

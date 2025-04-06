@@ -383,7 +383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5f21651b8d127979b29ed2431f885cd565f4abdafa65a0cfc4b2001434ba2b4"
 dependencies = [
  "async-std",
- "notify-future",
+ "notify-future 0.1.4",
 ]
 
 [[package]]
@@ -960,6 +960,12 @@ name = "notify-future"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6554346f0032fd123eb39eb7b05aa65ee122bc51090bae1291c86e8d077a8a65"
+
+[[package]]
+name = "notify-future"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaa0ee17c9a1ef38af21088fb063a697d263efb38c6510a68abc4ceef738a062"
 
 [[package]]
 name = "num"
@@ -1552,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "as-any",
  "async-trait",
@@ -1576,12 +1582,12 @@ dependencies = [
 
 [[package]]
 name = "sfo-pool"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaa5196111aae59a97fdb35e73a37de1de1e87d931918a1f66fab1a41e2e8a8a"
+checksum = "711b3f1543b085d82c3863402d4af9a2656797fbd260161226cd63af1e7ae4b9"
 dependencies = [
  "async-trait",
- "notify-future",
+ "notify-future 0.2.4",
  "sfo-result",
  "tokio",
 ]
