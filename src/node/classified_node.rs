@@ -15,9 +15,9 @@ use crate::server::CmdTunnelListener;
 
 #[derive(Debug, Clone, Eq, Hash)]
 pub struct CmdNodeTunnelClassification<C: WorkerClassification> {
-    peer_id: Option<PeerId>,
-    tunnel_id: Option<TunnelId>,
-    classification: Option<C>,
+    pub peer_id: Option<PeerId>,
+    pub tunnel_id: Option<TunnelId>,
+    pub classification: Option<C>,
 }
 
 impl<C: WorkerClassification> PartialEq for CmdNodeTunnelClassification<C> {
