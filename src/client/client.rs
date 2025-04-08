@@ -1,15 +1,16 @@
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
-use sfo_pool::{into_pool_err, pool_err, ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult};
+use sfo_pool::{into_pool_err, pool_err, ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, WorkerClassification};
 use sfo_split::{Splittable, WHalf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
 use crate::{CmdTunnelRead, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
-use crate::client::CmdClient;
+use crate::client::{CmdClient, SendGuard};
 use crate::cmd::{CmdBodyReadImpl, CmdHandler, CmdHandlerMap, CmdHeader};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::peer_id::PeerId;
@@ -28,6 +29,18 @@ where LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Fr
     pub(crate) tunnel_id: TunnelId,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 
+}
+
+impl<R, W, LEN, CMD> Deref for CmdSend<R, W, LEN, CMD>
+where R: CmdTunnelRead,
+      W: CmdTunnelWrite,
+      LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+      CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug {
+    type Target = W;
+
+    fn deref(&self) -> &Self::Target {
+        self.write.deref()
+    }
 }
 
 impl<R, W, LEN, CMD> CmdSend<R, W, LEN, CMD>
@@ -128,8 +141,34 @@ where R: CmdTunnelRead,
     }
 }
 
+pub struct ClassifiedSendGuard<
+    C: WorkerClassification,
+    W: CmdTunnelWrite,
+    CW: ClassifiedWorker<C> + Deref<Target=W>,
+    F: ClassifiedWorkerFactory<C, CW>> {
+    pub(crate) worker_guard: ClassifiedWorkerGuard<C, CW, F>
+}
 
-struct CmdWriteFactory<R: CmdTunnelRead,
+impl<
+    C: WorkerClassification,
+    W: CmdTunnelWrite,
+    CW: ClassifiedWorker<C> + Deref<Target=W>,
+    F: ClassifiedWorkerFactory<C, CW>> Deref for ClassifiedSendGuard<C, W, CW, F> {
+    type Target = W;
+
+    fn deref(&self) -> &Self::Target {
+        &self.worker_guard.deref()
+    }
+}
+
+impl<
+    C: WorkerClassification,
+    W: CmdTunnelWrite,
+    CW: ClassifiedWorker<C> + Deref<Target=W>,
+    F: ClassifiedWorkerFactory<C, CW>> SendGuard<W> for ClassifiedSendGuard<C, W, CW, F> {
+
+}
+pub struct CmdWriteFactory<R: CmdTunnelRead,
     W: CmdTunnelWrite,
     F: CmdTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
@@ -145,7 +184,7 @@ impl<R: CmdTunnelRead,
     F: CmdTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug> CmdWriteFactory<R, W, F, LEN, CMD> {
-    pub fn new(tunnel_factory: F, cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
+    pub(crate) fn new(tunnel_factory: F, cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
         Self {
             tunnel_factory,
             cmd_handler: Arc::new(cmd_handler),
@@ -236,12 +275,14 @@ impl<R: CmdTunnelRead,
     }
 }
 
+pub type CmdClientSendGuard<R, W, F, LEN, CMD> = ClassifiedSendGuard<TunnelId, W, CmdSend<R, W, LEN, CMD>, CmdWriteFactory<R, W, F, LEN, CMD>>;
 #[async_trait::async_trait]
 impl<R: CmdTunnelRead,
     W: CmdTunnelWrite,
     F: CmdTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug> CmdClient<LEN, CMD> for DefaultCmdClient<R, W, F, LEN, CMD> {
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug,
+    > CmdClient<LEN, CMD, W, CmdClientSendGuard<R, W, F, LEN, CMD>, > for DefaultCmdClient<R, W, F, LEN, CMD> {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
         self.cmd_handler_map.insert(cmd, handler);
     }
@@ -268,5 +309,11 @@ impl<R: CmdTunnelRead,
 
     async fn clear_all_tunnel(&self) {
         self.tunnel_pool.clear_all_worker().await;
+    }
+
+    async fn get_send(&self, tunnel_id: TunnelId) -> CmdResult<CmdClientSendGuard<R, W, F, LEN, CMD>> {
+        Ok(ClassifiedSendGuard {
+            worker_guard: self.get_send_of_tunnel_id(tunnel_id).await?
+        })
     }
 }

@@ -7,7 +7,7 @@ use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult};
 use sfo_split::{Splittable};
 use crate::{into_pool_err, pool_err, CmdHandler, CmdHeader, CmdNode, CmdTunnelRead, CmdTunnelWrite, PeerId, TunnelId, TunnelIdGenerator};
-use crate::client::{CmdSend};
+use crate::client::{ClassifiedSendGuard, CmdSend};
 use crate::cmd::{CmdHandlerMap};
 use crate::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use crate::node::create_recv_handle;
@@ -166,7 +166,7 @@ impl<R: CmdTunnelRead,
     }
 }
 
-struct CmdWriteFactory<R: CmdTunnelRead,
+pub struct CmdNodeWriteFactory<R: CmdTunnelRead,
     W: CmdTunnelWrite,
     F: CmdNodeTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
@@ -181,8 +181,8 @@ impl<R: CmdTunnelRead,
     F: CmdNodeTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
-    LISTENER: CmdTunnelListener<R, W>> CmdWriteFactory<R, W, F, LEN, CMD, LISTENER> {
-    pub fn new(tunnel_factory: F,
+    LISTENER: CmdTunnelListener<R, W>> CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER> {
+    pub(crate) fn new(tunnel_factory: F,
                tunnel_listener: LISTENER,
                cmd_handler: impl CmdHandler<LEN, CMD>) -> Self {
         Self {
@@ -201,7 +201,7 @@ impl<R: CmdTunnelRead,
     F: CmdNodeTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Debug,
-    LISTENER: CmdTunnelListener<R, W>> ClassifiedWorkerFactory<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>> for CmdWriteFactory<R, W, F, LEN, CMD, LISTENER> {
+    LISTENER: CmdTunnelListener<R, W>> ClassifiedWorkerFactory<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>> for CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER> {
     async fn create(&self, c: Option<(PeerId, Option<TunnelId>)>) -> PoolResult<CmdSend<R, W, LEN, CMD>> {
         self.inner.create(c).await
     }
@@ -212,7 +212,7 @@ pub struct DefaultCmdNode<R: CmdTunnelRead,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Eq + Hash + Debug,
     LISTENER: CmdTunnelListener<R, W>> {
-    tunnel_pool: ClassifiedWorkerPoolRef<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdWriteFactory<R, W, F, LEN, CMD, LISTENER>>,
+    tunnel_pool: ClassifiedWorkerPoolRef<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER>>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
 
@@ -225,7 +225,7 @@ impl<R: CmdTunnelRead,
     pub fn new(listener: LISTENER, factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
-        let write_factory = CmdWriteFactory::<R, W, _, LEN, CMD, LISTENER>::new(factory, listener, move |peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, body_read| {
+        let write_factory = CmdNodeWriteFactory::<R, W, _, LEN, CMD, LISTENER>::new(factory, listener, move |peer_id: PeerId, tunnel_id: TunnelId, header: CmdHeader<LEN, CMD>, body_read| {
             let handler_map = handler_map.clone();
             async move {
                 if let Some(handler) = handler_map.get(header.cmd_code()) {
@@ -241,23 +241,24 @@ impl<R: CmdTunnelRead,
         })
     }
 
-    async fn get_send(&self, peer_id: PeerId) -> CmdResult<ClassifiedWorkerGuard<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdWriteFactory<R, W, F, LEN, CMD, LISTENER>>> {
+    async fn get_send(&self, peer_id: PeerId) -> CmdResult<ClassifiedWorkerGuard<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER>>> {
         self.tunnel_pool.get_classified_worker((peer_id, None)).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 
-    async fn get_send_of_tunnel_id(&self, peer_id: PeerId, tunnel_id: TunnelId) -> CmdResult<ClassifiedWorkerGuard<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdWriteFactory<R, W, F, LEN, CMD, LISTENER>>> {
+    async fn get_send_of_tunnel_id(&self, peer_id: PeerId, tunnel_id: TunnelId) -> CmdResult<ClassifiedWorkerGuard<(PeerId, Option<TunnelId>), CmdSend<R, W, LEN, CMD>, CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER>>> {
         self.tunnel_pool.get_classified_worker((peer_id, Some(tunnel_id))).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
 
 }
 
+pub type CmdNodeSendGuard<R, W, F, LEN, CMD, LISTENER> = ClassifiedSendGuard<(PeerId, Option<TunnelId>), W, CmdSend<R, W, LEN, CMD>, CmdNodeWriteFactory<R, W, F, LEN, CMD, LISTENER>>;
 #[async_trait::async_trait]
 impl<R: CmdTunnelRead,
     W: CmdTunnelWrite,
     F: CmdNodeTunnelFactory<R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash + Debug,
-    LISTENER: CmdTunnelListener<R, W>> CmdNode<LEN, CMD> for DefaultCmdNode<R, W, F, LEN, CMD, LISTENER> {
+    LISTENER: CmdTunnelListener<R, W>> CmdNode<LEN, CMD, W, CmdNodeSendGuard<R, W, F, LEN, CMD, LISTENER>> for DefaultCmdNode<R, W, F, LEN, CMD, LISTENER> {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
         self.cmd_handler_map.insert(cmd, handler);
     }
@@ -284,5 +285,11 @@ impl<R: CmdTunnelRead,
 
     async fn clear_all_tunnel(&self) {
         self.tunnel_pool.clear_all_worker().await
+    }
+
+    async fn get_send(&self, peer_id: &PeerId, tunnel_id: TunnelId) -> CmdResult<CmdNodeSendGuard<R, W, F, LEN, CMD, LISTENER>> {
+        Ok(ClassifiedSendGuard {
+            worker_guard: self.get_send_of_tunnel_id(peer_id.clone(), tunnel_id).await?,
+        })
     }
 }
