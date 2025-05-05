@@ -39,8 +39,12 @@ pub trait ClassifiedCmdNode<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawF
     G: SendGuard<W>>: CmdNode<LEN, CMD, W, G> {
     async fn send_by_classified_tunnel(&self, classification: C, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
     async fn send2_by_classified_tunnel(&self, classification: C, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
+    async fn send_by_peer_classified_tunnel(&self, peer_id: &PeerId, classification: C, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
+    async fn send2_by_peer_classified_tunnel(&self, peer_id: &PeerId, classification: C, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
     async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId>;
+    async fn find_tunnel_id_by_peer_classified(&self, peer_id: &PeerId,classification: C) -> CmdResult<TunnelId>;
     async fn get_send_by_classified(&self, classification: C) -> CmdResult<G>;
+    async fn get_send_by_peer_classified(&self, peer_id: &PeerId, classification: C) -> CmdResult<G>;
 }
 
 

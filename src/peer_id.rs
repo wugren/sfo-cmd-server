@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 use base58::{FromBase58, ToBase58};
+use bucky_raw_codec::{RawDecode, RawEncode};
 use crate::errors::{cmd_err, CmdError, CmdErrorCode, CmdResult};
 
 pub trait ToBase36 {
@@ -27,7 +28,7 @@ impl FromBase36 for str {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash, RawDecode, RawEncode)]
 pub struct PeerId(Vec<u8>);
 impl PeerId {
     pub fn to_base58(&self) -> String {

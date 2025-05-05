@@ -317,6 +317,14 @@ impl<C: WorkerClassification,
             classification: Some(classification),
         }).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
     }
+
+    async fn get_peer_classified_send(&self, peer_id: PeerId, classification: C) -> CmdResult<ClassifiedWorkerGuard<CmdNodeTunnelClassification<C>, ClassifiedCmdSend<C, R, W, LEN, CMD>, ClassifiedCmdNodeWriteFactory<C, R, W, F, LEN, CMD, LISTENER>>> {
+        self.tunnel_pool.get_classified_worker(CmdNodeTunnelClassification {
+            peer_id: Some(peer_id),
+            tunnel_id: None,
+            classification: Some(classification),
+        }).await.map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+    }
 }
 
 pub type ClassifiedCmdNodeSendGuard<C, R, W, F, LEN, CMD, LISTENER> = ClassifiedSendGuard<CmdNodeTunnelClassification<C>, W, ClassifiedCmdSend<C, R, W, LEN, CMD>, ClassifiedCmdNodeWriteFactory<C, R, W, F, LEN, CMD, LISTENER>>;
@@ -381,14 +389,35 @@ impl<C: WorkerClassification,
         send.send2(cmd, version, body).await
     }
 
+    async fn send_by_peer_classified_tunnel(&self, peer_id: &PeerId, classification: C, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()> {
+        let mut send = self.get_peer_classified_send(peer_id.clone(), classification).await?;
+        send.send(cmd, version, body).await
+    }
+
+    async fn send2_by_peer_classified_tunnel(&self, peer_id: &PeerId, classification: C, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
+        let mut send = self.get_peer_classified_send(peer_id.clone(), classification).await?;
+        send.send2(cmd, version, body).await
+    }
+
     async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId> {
         let send = self.get_classified_send(classification).await?;
+        Ok(send.get_tunnel_id())
+    }
+
+    async fn find_tunnel_id_by_peer_classified(&self, peer_id: &PeerId, classification: C) -> CmdResult<TunnelId> {
+        let send = self.get_peer_classified_send(peer_id.clone(), classification).await?;
         Ok(send.get_tunnel_id())
     }
 
     async fn get_send_by_classified(&self, classification: C) -> CmdResult<ClassifiedCmdNodeSendGuard<C, R, W, F, LEN, CMD, LISTENER>> {
         Ok(ClassifiedSendGuard {
             worker_guard: self.get_classified_send(classification).await?,
+        })
+    }
+
+    async fn get_send_by_peer_classified(&self, peer_id: &PeerId, classification: C) -> CmdResult<ClassifiedCmdNodeSendGuard<C, R, W, F, LEN, CMD, LISTENER>> {
+        Ok(ClassifiedSendGuard {
+            worker_guard: self.get_peer_classified_send(peer_id.clone(), classification).await?,
         })
     }
 }
