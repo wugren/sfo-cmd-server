@@ -135,6 +135,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-named-locker"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f5f291b4ed8da9d20859926e8f13b143628ffafd36e50529f6add843b7862c"
+dependencies = [
+ "lazy_static",
+ "log",
+ "notify-future 0.1.5",
+]
+
+[[package]]
 name = "async-std"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,12 +389,12 @@ checksum = "325918d6fe32f23b19878fe4b34794ae41fc19ddbe53b10571a4874d44ffd39b"
 
 [[package]]
 name = "callback-result"
-version = "0.1.4"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5f21651b8d127979b29ed2431f885cd565f4abdafa65a0cfc4b2001434ba2b4"
+checksum = "62bf3c7b9a1ee7c6e55f9f176068eacc3f43cfaeab49d80958cd5d4a0d96d1a5"
 dependencies = [
  "async-std",
- "notify-future 0.1.4",
+ "notify-future 0.2.4",
 ]
 
 [[package]]
@@ -596,7 +607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "835c052cb0c08c1acf6ffd71c022172e18723949c8282f2b9f27efbc51e64534"
 dependencies = [
  "byteorder",
- "rand",
+ "rand 0.8.5",
  "rustc-hex",
  "static_assertions",
 ]
@@ -957,9 +968,9 @@ dependencies = [
 
 [[package]]
 name = "notify-future"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6554346f0032fd123eb39eb7b05aa65ee122bc51090bae1291c86e8d077a8a65"
+checksum = "334498b5ebb63e6bb9ea9206a3f4a57c451abd7565a182088738ab01443c195e"
 
 [[package]]
 name = "notify-future"
@@ -1352,8 +1363,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
  "libc",
- "rand_chacha",
- "rand_core",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -1363,7 +1384,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -1373,6 +1404,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.15",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+dependencies = [
+ "getrandom 0.3.1",
 ]
 
 [[package]]
@@ -1561,15 +1601,19 @@ name = "sfo-cmd-server"
 version = "0.1.5"
 dependencies = [
  "as-any",
+ "async-named-locker",
  "async-trait",
  "base-x",
  "base58",
  "bucky-raw-codec",
  "callback-result",
  "callback-trait",
+ "futures-lite",
  "hex",
  "log",
  "num",
+ "pin-project-lite",
+ "rand 0.9.1",
  "rcgen",
  "rustls",
  "sfo-pool",

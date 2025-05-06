@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::{Arc};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use rcgen::{generate_simple_self_signed};
 use rustls::crypto::{ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -9,7 +10,7 @@ use rustls::{DigitallySignedStruct, DistinguishedName, Error, ServerConfig, Sign
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::version::TLS13;
 use tokio::net::TcpListener;
-use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 use rustls::pki_types::pem::PemObject;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -168,13 +169,24 @@ impl CmdTunnelListener<TlsStreamRead, TlsStreamWrite> for TunnelListener {
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = DefaultCmdServer::<TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener);
+    let server = DefaultCmdServer::<TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener, Duration::from_secs(10));
     let sender = server.clone();
     server.register_cmd_handler(0x01, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body_read| {
         let sender = sender.clone();
         async move {
+            drop(_body_read);
             println!("recv cmd {}", header.cmd_code());
-            sender.send(&peer_id, 0x02, 0, "server".as_bytes()).await
+            // sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
+            let resp = sender.send_with_resp(&peer_id, 0x06, 0, "server".as_bytes()).await?;
+            println!("recv client resp. cmd {} data {}", 0x06, resp.into_string().await?);
+            Ok(None)
+        }
+    });
+
+    server.register_cmd_handler(0x03, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, mut _body_read: CmdBody| {
+        async move {
+            println!("recv cmd {} body {}", header.cmd_code(), _body_read.into_string().await?);
+            Ok(Some(CmdBody::from_string("server resp".to_string())))
         }
     });
     server.start();

@@ -1,10 +1,8 @@
-use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use as_any::AsAny;
 use rcgen::generate_simple_self_signed;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
@@ -15,7 +13,7 @@ use rustls::version::TLS13;
 use sha2::Digest;
 use tokio::io::{split, AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsConnector;
-use sfo_cmd_server::{CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
 use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory, DefaultCmdClient};
 use sfo_cmd_server::errors::{into_cmd_err, CmdErrorCode, CmdResult};
 
@@ -172,18 +170,26 @@ impl CmdTunnelFactory<TlsStreamRead, TlsStreamWrite> for TlsConnectionFactory {
 }
 #[tokio::main]
 async fn main() {
-    let client = DefaultCmdClient::<TlsStreamRead, TlsStreamWrite, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
+    let client = DefaultCmdClient::<TlsStreamRead, TlsStreamWrite, _, u16, u8>::new(TlsConnectionFactory::new(), 5, Duration::from_secs(1000));
 
-    let sender = client.clone();
     client.register_cmd_handler(0x02, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
-        let sender = sender.clone();
         async move {
             println!("recv cmd {}", header.cmd_code());
-            Ok(())
+            Ok(None)
+        }
+    });
+
+
+    client.register_cmd_handler(0x06, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
+        async move {
+            println!("recv cmd {}", header.cmd_code());
+            Ok(Some(CmdBody::from_string("client resp".to_string())))
         }
     });
 
     client.send(0x01, 0, "client".as_bytes()).await.unwrap();
+    // let resp = client.send_with_resp(0x03, 0, "client send 0x03".as_bytes()).await.unwrap();
+    // println!("recv server resp. cmd {} data {}", 0x06, resp.into_string().await.unwrap());
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1000)).await;
 }

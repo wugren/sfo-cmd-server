@@ -10,6 +10,7 @@ pub enum CmdErrorCode {
     TlsError,
     RawCodecError,
     PeerConnectionNotFound,
+    Timeout,
 }
 
 pub type CmdResult<T> = sfo_result::Result<T, CmdErrorCode>;
