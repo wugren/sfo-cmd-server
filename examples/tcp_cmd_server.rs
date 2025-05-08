@@ -174,11 +174,19 @@ async fn main() {
     server.register_cmd_handler(0x01, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body_read| {
         let sender = sender.clone();
         async move {
-            drop(_body_read);
-            println!("recv cmd {}", header.cmd_code());
-            // sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
-            let resp = sender.send_with_resp(&peer_id, 0x06, 0, "server".as_bytes()).await?;
-            println!("recv client resp. cmd {} data {}", 0x06, resp.into_string().await?);
+            sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
+            tokio::spawn(
+                async move {
+                    match sender.send_with_resp(&peer_id, 0x06, 0, "server".as_bytes()).await {
+                        Ok(resp) => {
+                            println!("recv client resp. cmd {} data {}", 0x06, resp.into_string().await.unwrap());
+                        }
+                        Err(e) => {
+                            println!("send err {}", e.msg());
+                        }
+                    }
+                }
+            );
             Ok(None)
         }
     });
@@ -186,7 +194,7 @@ async fn main() {
     server.register_cmd_handler(0x03, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, mut _body_read: CmdBody| {
         async move {
             println!("recv cmd {} body {}", header.cmd_code(), _body_read.into_string().await?);
-            Ok(Some(CmdBody::from_string("server resp".to_string())))
+            Ok(Some(CmdBody::from_string("server resp 0x03".to_string())))
         }
     });
     server.start();

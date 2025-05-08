@@ -112,7 +112,7 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
 
 impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin> Drop for CmdBodyRead<R, W> {
     fn drop(&mut self) {
-        if self.recv.is_none() || self.len == self.offset {
+        if self.recv.is_none() || (self.len == self.offset && self.len != 0) {
             return;
         }
         let mut recv = self.recv.take().unwrap();

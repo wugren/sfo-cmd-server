@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use async_named_locker::ObjectHolder;
+use async_named_locker::{NamedStateHolder, ObjectHolder};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 use num::{FromPrimitive, ToPrimitive};
 use sfo_split::Splittable;
@@ -79,13 +79,14 @@ pub struct DefaultCmdServer<R: CmdTunnelRead, W: CmdTunnelWrite, LEN, CMD, LISTE
     event_emit: CmdServerEventListenerEmit,
     resp_waiter: RespWaiterRef,
     timeout: Duration,
+    state_holder: Arc<NamedStateHolder<tokio::task::Id>>,
     _l: Mutex<std::marker::PhantomData<(R, W, LEN, CMD)>>,
 }
 
 impl<R: CmdTunnelRead,
     W: CmdTunnelWrite,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash + Debug,
     LISTENER: CmdTunnelListener<R, W>> DefaultCmdServer<R, W, LEN, CMD, LISTENER> {
     pub fn new(tunnel_listener: LISTENER, timeout: Duration) -> Arc<Self> {
         let event_emit = CmdServerEventListenerEmit::new();
@@ -96,6 +97,7 @@ impl<R: CmdTunnelRead,
             event_emit,
             resp_waiter: Arc::new(RespWaiter::new()),
             timeout,
+            state_holder: NamedStateHolder::new(),
             _l: Default::default(),
         })
     }
@@ -125,6 +127,7 @@ impl<R: CmdTunnelRead,
             let tunnel_id = self.peer_manager.generate_conn_id();
             let this = self.clone();
             let resp_waiter = self.resp_waiter.clone();
+            let state_holder = self.state_holder.clone();
             tokio::spawn(async move {
                 let remote_id = peer_id.clone();
                 let ret: CmdResult<()> = async move {
@@ -134,6 +137,7 @@ impl<R: CmdTunnelRead,
                     let writer = ObjectHolder::new(writer);
                     let resp_write = writer.clone();
                     let resp_waiter = resp_waiter.clone();
+                    let state_holder = state_holder.clone();
                     let recv_handle = tokio::spawn(async move {
                         let ret: CmdResult<()> = async move {
                             loop {
@@ -144,6 +148,7 @@ impl<R: CmdTunnelRead,
                                     break;
                                 }
                                 let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                                println!("recv cmd {:?}", header.cmd_code());
                                 let body_len = header.pkg_len().to_u64().unwrap();
                                 let cmd_read = CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
                                 let waiter = cmd_read.get_waiter();
@@ -159,7 +164,10 @@ impl<R: CmdTunnelRead,
                                             let version = header.version();
                                             let seq = header.seq();
                                             let cmd_code = header.cmd_code();
-                                            match handler.handle(remote_id.clone(), tunnel_id, header, body).await {
+                                            match {
+                                                let _handle_state = state_holder.new_state(tokio::task::id());
+                                                handler.handle(remote_id.clone(), tunnel_id, header, body).await
+                                            } {
                                                 Ok(Some(mut body)) => {
                                                     let mut write = resp_write.get().await;
                                                     let header = CmdHeader::<LEN, CMD>::new(version, true, seq, cmd_code, LEN::from_u64(body.len()).unwrap());
@@ -242,6 +250,11 @@ impl<R: CmdTunnelRead,
     async fn send_with_resp(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<CmdBody> {
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
+            if let Some(id) = tokio::task::try_id() {
+                if self.state_holder.has_state(id) {
+                    continue;
+                }
+            }
             let ret: CmdResult<CmdBody> = async move {
                 log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
                 let seq = gen_seq();
@@ -249,19 +262,23 @@ impl<R: CmdTunnelRead,
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let resp_id = gen_resp_id(cmd, seq);
                 let waiter = self.resp_waiter.create_timeout_result_future(resp_id, self.timeout).map_err(into_cmd_err!(CmdErrorCode::Failed))?;
-                let mut send = conn.send.get().await;
-                if buf.len() > 255 {
-                    return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                {
+                    let mut send = conn.send.get().await;
+                    if buf.len() > 255 {
+                        return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                    }
+                    send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 }
-                send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
+                let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout, "cmd {:?}", cmd))?;
                 Ok(body )
             }.await;
             if ret.is_ok() {
                 return ret;
+            } else {
+                println!("send err {:?}", ret.unwrap_err());
             }
         }
         Err(cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id))
@@ -301,6 +318,11 @@ impl<R: CmdTunnelRead,
     async fn send2_with_resp(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<CmdBody> {
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
+            if let Some(id) = tokio::task::try_id() {
+                if self.state_holder.has_state(id) {
+                    continue;
+                }
+            }
             let ret: CmdResult<CmdBody> = async move {
                 let mut len = 0;
                 for b in body.iter() {
@@ -313,16 +335,18 @@ impl<R: CmdTunnelRead,
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let resp_id = gen_resp_id(cmd, seq);
                 let waiter = self.resp_waiter.create_timeout_result_future(resp_id, self.timeout).map_err(into_cmd_err!(CmdErrorCode::Failed))?;
-                let mut send = conn.send.get().await;
-                if buf.len() > 255 {
-                    return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                {
+                    let mut send = conn.send.get().await;
+                    if buf.len() > 255 {
+                        return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                    }
+                    send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    for b in body.iter() {
+                        send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    }
+                    send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 }
-                send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                for b in body.iter() {
-                    send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                }
-                send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
                 Ok(body)
             }.await;
@@ -364,6 +388,11 @@ impl<R: CmdTunnelRead,
         let body_data = body.into_bytes().await?;
         let data_ref = body_data.as_slice();
         for conn in connections {
+            if let Some(id) = tokio::task::try_id() {
+                if self.state_holder.has_state(id) {
+                    continue;
+                }
+            }
             let ret: CmdResult<CmdBody> = async move {
                 log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, data_ref.len());
                 let seq = gen_seq();
@@ -371,14 +400,16 @@ impl<R: CmdTunnelRead,
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let resp_id = gen_resp_id(cmd, seq);
                 let waiter = self.resp_waiter.create_timeout_result_future(resp_id, self.timeout).map_err(into_cmd_err!(CmdErrorCode::Failed))?;
-                let mut send = conn.send.get().await;
-                if buf.len() > 255 {
-                    return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                {
+                    let mut send = conn.send.get().await;
+                    if buf.len() > 255 {
+                        return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+                    }
+                    send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.write_all(data_ref).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 }
-                send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(data_ref).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
                 Ok(body )
             }.await;
@@ -416,6 +447,11 @@ impl<R: CmdTunnelRead,
             return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
         }
         let conn = conn.unwrap();
+        if let Some(id) = tokio::task::try_id() {
+            if self.state_holder.has_state(id) {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send msg with resp in tunnel {:?} msg handle", conn.conn_id));
+            }
+        }
         assert_eq!(tunnel_id, conn.conn_id);
         log::trace!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
         let seq = gen_seq();
@@ -423,14 +459,16 @@ impl<R: CmdTunnelRead,
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         let resp_id = gen_resp_id(cmd, seq);
         let waiter = self.resp_waiter.create_timeout_result_future(resp_id, self.timeout).map_err(into_cmd_err!(CmdErrorCode::Failed))?;
-        let mut send = conn.send.get().await;
-        if buf.len() > 255 {
-            return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+        {
+            let mut send = conn.send.get().await;
+            if buf.len() > 255 {
+                return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+            }
+            send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         }
-        send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
         Ok(body)
     }
@@ -469,6 +507,11 @@ impl<R: CmdTunnelRead,
             return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
         }
         let conn = conn.unwrap();
+        if let Some(id) = tokio::task::try_id() {
+            if self.state_holder.has_state(id) {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send msg with resp in tunnel {:?} msg handle", conn.conn_id));
+            }
+        }
         assert_eq!(tunnel_id, conn.conn_id);
         let mut len = 0;
         for b in body.iter() {
@@ -484,13 +527,15 @@ impl<R: CmdTunnelRead,
         if buf.len() > 255 {
             return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
         }
-        let mut send = conn.send.get().await;
-        send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        for b in body.iter() {
-            send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        {
+            let mut send = conn.send.get().await;
+            send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            for b in body.iter() {
+                send.write_all(b).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            }
+            send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         }
-        send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
         Ok(body)
     }
@@ -522,6 +567,11 @@ impl<R: CmdTunnelRead,
             return Err(cmd_err!(CmdErrorCode::PeerConnectionNotFound, "tunnel_id: {:?}", tunnel_id));
         }
         let conn = conn.unwrap();
+        if let Some(id) = tokio::task::try_id() {
+            if self.state_holder.has_state(id) {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send msg with resp in tunnel {:?} msg handle", conn.conn_id));
+            }
+        }
         assert_eq!(tunnel_id, conn.conn_id);
         log::trace!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, body.len());
         let seq = gen_seq();
@@ -529,14 +579,16 @@ impl<R: CmdTunnelRead,
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         let resp_id = gen_resp_id(cmd, seq);
         let waiter = self.resp_waiter.create_timeout_result_future(resp_id, self.timeout).map_err(into_cmd_err!(CmdErrorCode::Failed))?;
-        let mut send = conn.send.get().await;
-        if buf.len() > 255 {
-            return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+        {
+            let mut send = conn.send.get().await;
+            if buf.len() > 255 {
+                return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+            }
+            send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            tokio::io::copy(&mut body, send.deref_mut().deref_mut()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         }
-        send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        tokio::io::copy(&mut body, send.deref_mut().deref_mut()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
         let body = waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout))?;
         Ok(body)
     }

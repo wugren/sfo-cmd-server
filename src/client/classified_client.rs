@@ -125,6 +125,11 @@ where C: WorkerClassification,
     }
 
     pub async fn send_with_resp(&mut self, cmd: CMD, version: u8, body: &[u8], timeout: Duration) -> CmdResult<CmdBody> {
+        if let Some(id) = tokio::task::try_id() {
+            if id == self.recv_handle.id() {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send with resp in recv task"));
+            }
+        }
         log::trace!("client {:?} send cmd: {:?}, len: {}, data: {}", self.tunnel_id, cmd, body.len(), hex::encode(body));
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(body.len() as u64).unwrap());
@@ -160,6 +165,11 @@ where C: WorkerClassification,
     }
 
     pub async fn send2_with_resp(&mut self, cmd: CMD, version: u8, body: &[&[u8]], timeout: Duration) -> CmdResult<CmdBody> {
+        if let Some(id) = tokio::task::try_id() {
+            if id == self.recv_handle.id() {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send with resp in recv task"));
+            }
+        }
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
@@ -193,8 +203,13 @@ where C: WorkerClassification,
         }
         Ok(())
     }
-    
+
     pub async fn send_cmd_with_resp(&mut self, cmd: CMD, version: u8, body: CmdBody, timeout: Duration) -> CmdResult<CmdBody> {
+        if let Some(id) = tokio::task::try_id() {
+            if id == self.recv_handle.id() {
+                return Err(cmd_err!(CmdErrorCode::Failed, "can't send with resp in recv task"));
+            }
+        }
         log::trace!("client {:?} send cmd: {:?}, len: {}", self.tunnel_id, cmd, body.len());
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(body.len()).unwrap());
@@ -211,7 +226,7 @@ where C: WorkerClassification,
         let resp = resp_waiter.await.map_err(into_cmd_err!(CmdErrorCode::Timeout, "recv resp error"))?;
         Ok(resp)
     }
-    
+
     async fn send_inner(&mut self, header: &[u8], body: &[u8]) -> CmdResult<()> {
         let mut write = self.write.get().await;
         if header.len() > 255 {

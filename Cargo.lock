@@ -136,9 +136,9 @@ dependencies = [
 
 [[package]]
 name = "async-named-locker"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f5f291b4ed8da9d20859926e8f13b143628ffafd36e50529f6add843b7862c"
+checksum = "24b6ae3dd5304a5cb204d4c9ee95fa5643dc1d18df3125e5360df8a0c1b55b3e"
 dependencies = [
  "lazy_static",
  "log",

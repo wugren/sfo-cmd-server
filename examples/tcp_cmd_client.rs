@@ -183,13 +183,13 @@ async fn main() {
     client.register_cmd_handler(0x06, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
         async move {
             println!("recv cmd {}", header.cmd_code());
-            Ok(Some(CmdBody::from_string("client resp".to_string())))
+            Ok(Some(CmdBody::from_string("client resp 6".to_string())))
         }
     });
 
     client.send(0x01, 0, "client".as_bytes()).await.unwrap();
-    // let resp = client.send_with_resp(0x03, 0, "client send 0x03".as_bytes()).await.unwrap();
-    // println!("recv server resp. cmd {} data {}", 0x06, resp.into_string().await.unwrap());
+    let resp = client.send_with_resp(0x03, 0, "client send 0x03".as_bytes()).await.unwrap();
+    println!("recv server resp. cmd {} data {}", 0x03, resp.into_string().await.unwrap());
 
-    tokio::time::sleep(Duration::from_secs(1000)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 }
