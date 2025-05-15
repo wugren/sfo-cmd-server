@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::{CmdTunnelRead, CmdTunnelWrite};
+use crate::{CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
 use crate::server::CmdServerEventListener;
@@ -11,22 +11,24 @@ pub struct CachedPeerInfo {
     pub conn_list: Vec<TunnelId>,
 }
 
-pub struct PeerManager<R: CmdTunnelRead, W: CmdTunnelWrite> {
+pub struct PeerManager<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> {
     conn_cache: Mutex<HashMap<TunnelId, (PeerId, Arc<PeerConnection<R, W>>)>>,
     device_conn_map: Mutex<HashMap<PeerId, CachedPeerInfo>>,
     conn_id_generator: TunnelIdGenerator,
     listener: Arc<dyn CmdServerEventListener>,
+    _p: std::marker::PhantomData<M>,
 }
-pub type PeerManagerRef<R, W> = Arc<PeerManager<R, W>>;
+pub type PeerManagerRef<M, R, W> = Arc<PeerManager<M, R, W>>;
 
 
-impl<R: CmdTunnelRead, W: CmdTunnelWrite> PeerManager<R, W> {
-    pub fn new(listener: Arc<dyn CmdServerEventListener>) -> PeerManagerRef<R, W> {
+impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M, R, W> {
+    pub fn new(listener: Arc<dyn CmdServerEventListener>) -> PeerManagerRef<M, R, W> {
         Arc::new(PeerManager {
             conn_cache: Mutex::new(HashMap::new()),
             device_conn_map: Mutex::new(HashMap::new()),
             conn_id_generator: TunnelIdGenerator::new(),
             listener,
+            _p: Default::default(),
         })
     }
 

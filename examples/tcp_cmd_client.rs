@@ -40,7 +40,7 @@ impl AsyncRead for TlsStreamRead {
 }
 
 
-impl CmdTunnelRead for TlsStreamRead {
+impl CmdTunnelRead<()> for TlsStreamRead {
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -86,7 +86,7 @@ impl AsyncWrite for TlsStreamWrite {
     }
 }
 
-impl CmdTunnelWrite for TlsStreamWrite {
+impl CmdTunnelWrite<()> for TlsStreamWrite {
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -156,7 +156,7 @@ impl TlsConnectionFactory {
 }
 
 #[async_trait::async_trait]
-impl CmdTunnelFactory<TlsStreamRead, TlsStreamWrite> for TlsConnectionFactory {
+impl CmdTunnelFactory<(), TlsStreamRead, TlsStreamWrite> for TlsConnectionFactory {
     async fn create_tunnel(&self) -> CmdResult<CmdTunnel<TlsStreamRead, TlsStreamWrite>> {
         let socket = tokio::net::TcpStream::connect("127.0.0.1:4453").await.map_err(into_cmd_err!(CmdErrorCode::IoError, "connect to server failed"))?;
         let tls_stream = self.tls_connector.connect("127.0.0.1".to_string().try_into().unwrap(), socket).await.map_err(into_cmd_err!(CmdErrorCode::IoError, "tls handshake failed"))?;
@@ -170,7 +170,7 @@ impl CmdTunnelFactory<TlsStreamRead, TlsStreamWrite> for TlsConnectionFactory {
 }
 #[tokio::main]
 async fn main() {
-    let client = DefaultCmdClient::<TlsStreamRead, TlsStreamWrite, _, u16, u8>::new(TlsConnectionFactory::new(), 5, Duration::from_secs(1000));
+    let client = DefaultCmdClient::<(), TlsStreamRead, TlsStreamWrite, _, u16, u8>::new(TlsConnectionFactory::new(), 5);
 
     client.register_cmd_handler(0x02, move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| {
         async move {
@@ -188,7 +188,7 @@ async fn main() {
     });
 
     client.send(0x01, 0, "client".as_bytes()).await.unwrap();
-    let resp = client.send_with_resp(0x03, 0, "client send 0x03".as_bytes()).await.unwrap();
+    let resp = client.send_with_resp(0x03, 0, "client send 0x03".as_bytes(), Duration::from_secs(1000)).await.unwrap();
     println!("recv server resp. cmd {} data {}", 0x03, resp.into_string().await.unwrap());
 
     tokio::time::sleep(Duration::from_secs(10)).await;

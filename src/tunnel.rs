@@ -1,15 +1,30 @@
 use std::any::Any;
+use std::sync::Arc;
 use as_any::AsAny;
 use sfo_split::{RHalf, Splittable, WHalf};
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::PeerId;
 
-pub trait CmdTunnelRead: Send + AsyncRead + 'static + Unpin + Any + AsAny {
-    fn get_remote_peer_id(&self) -> PeerId;
+pub trait CmdTunnelMeta: Send + Sync + 'static {
+
 }
 
-pub trait CmdTunnelWrite: AsyncWrite + Send + 'static + Unpin + Any + AsAny {
+impl<T: Send + Sync + 'static> CmdTunnelMeta for T {
+    
+}
+
+pub trait CmdTunnelRead<M: CmdTunnelMeta>: Send + AsyncRead + 'static + Unpin + Any + AsAny {
     fn get_remote_peer_id(&self) -> PeerId;
+    fn get_tunnel_meta(&self) -> Option<Arc<M>> {
+        None
+    }
+}
+
+pub trait CmdTunnelWrite<M: CmdTunnelMeta>: AsyncWrite + Send + 'static + Unpin + Any + AsAny {
+    fn get_remote_peer_id(&self) -> PeerId;
+    fn get_tunnel_meta(&self) -> Option<Arc<M>> {
+        None
+    }
 }
 
 pub type CmdTunnel<R, W> = Splittable<R, W>;

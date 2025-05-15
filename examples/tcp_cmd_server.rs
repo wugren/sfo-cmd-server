@@ -42,7 +42,7 @@ impl AsyncRead for TlsStreamRead {
 }
 
 
-impl CmdTunnelRead for TlsStreamRead {
+impl CmdTunnelRead<()> for TlsStreamRead {
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -88,7 +88,7 @@ impl AsyncWrite for TlsStreamWrite {
     }
 }
 
-impl CmdTunnelWrite for TlsStreamWrite {
+impl CmdTunnelWrite<()> for TlsStreamWrite {
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -153,7 +153,7 @@ impl TunnelListener {
     }
 }
 #[async_trait::async_trait]
-impl CmdTunnelListener<TlsStreamRead, TlsStreamWrite> for TunnelListener {
+impl CmdTunnelListener<(), TlsStreamRead, TlsStreamWrite> for TunnelListener {
     async fn accept(&self) -> sfo_cmd_server::errors::CmdResult<CmdTunnel<TlsStreamRead, TlsStreamWrite>> {
         let (stream, _) = self.tcp_listener.accept().await.map_err(into_cmd_err!(CmdErrorCode::IoError, "accept failed"))?;
         let tls_stream = self.tls_acceptor.accept(stream).await.map_err(into_cmd_err!(CmdErrorCode::TlsError, "tls accept failed"))?;
@@ -169,15 +169,15 @@ impl CmdTunnelListener<TlsStreamRead, TlsStreamWrite> for TunnelListener {
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = DefaultCmdServer::<TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener, Duration::from_secs(10));
+    let server = DefaultCmdServer::<(), TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener);
     let sender = server.clone();
-    server.register_cmd_handler(0x01, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body_read| {
+    server.register_cmd_handler(0x01, move |peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body_read| {
         let sender = sender.clone();
         async move {
             sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
             tokio::spawn(
                 async move {
-                    match sender.send_with_resp(&peer_id, 0x06, 0, "server".as_bytes()).await {
+                    match sender.send_with_resp(&peer_id, 0x06, 0, "server".as_bytes(), Duration::from_secs(10)).await {
                         Ok(resp) => {
                             println!("recv client resp. cmd {} data {}", 0x06, resp.into_string().await.unwrap());
                         }
@@ -191,7 +191,7 @@ async fn main() {
         }
     });
 
-    server.register_cmd_handler(0x03, move |peer_id, _tunnel_id, header: CmdHeader<u16, u8>, mut _body_read: CmdBody| {
+    server.register_cmd_handler(0x03, move |_peer_id, _tunnel_id, header: CmdHeader<u16, u8>, mut _body_read: CmdBody| {
         async move {
             println!("recv cmd {} body {}", header.cmd_code(), _body_read.into_string().await?);
             Ok(Some(CmdBody::from_string("server resp 0x03".to_string())))

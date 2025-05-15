@@ -1,7 +1,9 @@
 mod client;
 
 use std::hash::Hash;
+use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use callback_result::CallbackWaiter;
 use num::{FromPrimitive, ToPrimitive};
@@ -11,31 +13,36 @@ pub use client::*;
 mod classified_client;
 pub use classified_client::*;
 
-use crate::{CmdBody, CmdHandler, TunnelId};
+use crate::{CmdBody, CmdHandler, CmdTunnelMeta, PeerId, TunnelId};
 use crate::errors::CmdResult;
 
-pub trait SendGuard: Send + 'static {
+pub trait CmdSend<M: CmdTunnelMeta>: Send + 'static {
+    fn get_tunnel_meta(&self) -> Option<Arc<M>>;
+    fn get_remote_peer_id(&self) -> PeerId;
+}
 
+pub trait SendGuard<M: CmdTunnelMeta, S: CmdSend<M>>: Send + 'static + Deref<Target = S>  {
 }
 
 #[async_trait::async_trait]
 pub trait CmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
-    W,
-    G: SendGuard>: Send + Sync + 'static {
+    M: CmdTunnelMeta,
+    S: CmdSend<M>,
+    G: SendGuard<M, S>>: Send + Sync + 'static {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>);
     async fn send(&self, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
-    async fn send_with_resp(&self, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<CmdBody>;
+    async fn send_with_resp(&self, cmd: CMD, version: u8, body: &[u8], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send2(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
-    async fn send2_with_resp(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<CmdBody>;
+    async fn send2_with_resp(&self, cmd: CMD, version: u8, body: &[&[u8]], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send_cmd(&self, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()>;
-    async fn send_cmd_with_resp(&self, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<CmdBody>;
+    async fn send_cmd_with_resp(&self, cmd: CMD, version: u8, body: CmdBody, timeout: Duration) -> CmdResult<CmdBody>;
     async fn send_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
-    async fn send_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<CmdBody>;
+    async fn send_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[u8], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send2_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
-    async fn send2_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<CmdBody>;
+    async fn send2_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: &[&[u8]], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send_cmd_by_specify_tunnel(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()>;
-    async fn send_cmd_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<CmdBody>;
+    async fn send_cmd_by_specify_tunnel_with_resp(&self, tunnel_id: TunnelId, cmd: CMD, version: u8, body: CmdBody, timeout: Duration) -> CmdResult<CmdBody>;
     async fn clear_all_tunnel(&self);
     async fn get_send(&self, tunnel_id: TunnelId) -> CmdResult<G>;
 }
@@ -44,14 +51,15 @@ pub trait CmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedByte
 pub trait ClassifiedCmdClient<LEN: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     C: WorkerClassification,
-    W,
-    G: SendGuard>: CmdClient<LEN, CMD, W, G> {
+    M: CmdTunnelMeta,
+    S: CmdSend<M>,
+    G: SendGuard<M, S>>: CmdClient<LEN, CMD, M, S, G> {
     async fn send_by_classified_tunnel(&self, classification: C, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()>;
-    async fn send_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<CmdBody>;
+    async fn send_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: &[u8], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send2_by_classified_tunnel(&self, classification: C, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
-    async fn send2_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<CmdBody>;
+    async fn send2_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: &[&[u8]], timeout: Duration) -> CmdResult<CmdBody>;
     async fn send_cmd_by_classified_tunnel(&self, classification: C, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()>;
-    async fn send_cmd_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<CmdBody>;
+    async fn send_cmd_by_classified_tunnel_with_resp(&self, classification: C, cmd: CMD, version: u8, body: CmdBody, timeout: Duration) -> CmdResult<CmdBody>;
     async fn find_tunnel_id_by_classified(&self, classification: C) -> CmdResult<TunnelId>;
     async fn get_send_by_classified(&self, classification: C) -> CmdResult<G>;
 }
