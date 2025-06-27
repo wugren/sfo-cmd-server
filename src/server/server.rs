@@ -600,6 +600,7 @@ impl<M: CmdTunnelMeta,
                 let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(body.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let mut send = conn.send.get().await;
+                send.write_u8(buf.len() as u8).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 send.write_all(buf.as_slice()).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 send.write_all(body).await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 send.flush().await.map_err(into_cmd_err!(CmdErrorCode::IoError))?;
