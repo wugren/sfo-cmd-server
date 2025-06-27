@@ -142,10 +142,15 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
             return Poll::Ready(Ok(()));
         }
         let recv = Pin::new(this.recv.as_mut().unwrap().deref_mut());
-        let fut = recv.poll_read(cx, buf);
+        let read_len = std::cmp::min(len, buf.remaining());
+        let mut read_buf = ReadBuf::new(buf.initialize_unfilled_to(read_len));
+        let fut = recv.poll_read(cx, &mut read_buf);
         match fut {
             Poll::Ready(Ok(())) => {
-                this.offset += buf.filled().len();
+                let len = read_buf.filled().len();
+                drop(read_buf);
+                this.offset += len;
+                buf.advance(len);
                 if this.offset == this.len {
                     this.waiter.set_result_with_cache(Ok(this.recv.take().unwrap()));
                 }
