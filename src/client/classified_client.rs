@@ -435,6 +435,9 @@ impl<C: WorkerClassification,
                 }
                 Ok(())
             }.await;
+            if ret.is_err() {
+                log::error!("recv cmd error: {:?}", ret.as_ref().unwrap());
+            }
             ret
         });
         Ok(ClassifiedCmdSend::new(tunnel_id, classification, handle, write, self.resp_waiter.clone(), remote_id, tunnel_meta))

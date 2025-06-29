@@ -147,7 +147,7 @@ impl<M: CmdTunnelMeta,
                                     break;
                                 }
                                 let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice()).map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                                println!("recv cmd {:?}", header.cmd_code());
+                                sfo_log::debug!("recv cmd {:?}", header.cmd_code());
                                 let body_len = header.pkg_len().to_u64().unwrap();
                                 let cmd_read = CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
                                 let waiter = cmd_read.get_waiter();
@@ -192,6 +192,9 @@ impl<M: CmdTunnelMeta,
                             }
                             Ok(())
                         }.await;
+                        if ret.is_err() {
+                            log::error!("recv cmd error: {:?}", ret.as_ref().unwrap());
+                        }
                         ret
                     });
 
@@ -227,7 +230,7 @@ impl<M: CmdTunnelMeta,
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
             let ret: CmdResult<()> = async move {
-                log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
+                log::debug!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
                 let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(body.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let mut send = conn.send.get().await;
@@ -256,7 +259,7 @@ impl<M: CmdTunnelMeta,
                 }
             }
             let ret: CmdResult<CmdBody> = async move {
-                log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
+                log::debug!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
                 let seq = gen_seq();
                 let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(body.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
@@ -278,7 +281,7 @@ impl<M: CmdTunnelMeta,
             if ret.is_ok() {
                 return ret;
             } else {
-                println!("send err {:?}", ret.unwrap_err());
+                sfo_log::error!("send err {:?}", ret.unwrap_err());
             }
         }
         Err(cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id))
@@ -291,9 +294,9 @@ impl<M: CmdTunnelMeta,
                 let mut len = 0;
                 for b in body.iter() {
                     len += b.len();
-                    log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
+                    log::debug!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
                 }
-                log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
+                log::debug!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
                 let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(len as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let mut send = conn.send.get().await;
@@ -327,9 +330,9 @@ impl<M: CmdTunnelMeta,
                 let mut len = 0;
                 for b in body.iter() {
                     len += b.len();
-                    log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
+                    log::debug!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
                 }
-                log::trace!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
+                log::debug!("send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
                 let seq = gen_seq();
                 let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(len as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
@@ -363,7 +366,7 @@ impl<M: CmdTunnelMeta,
         let connections = self.peer_manager.find_connections(peer_id);
         for conn in connections {
             let ret: CmdResult<()> = async move {
-                log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
+                log::debug!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}", peer_id, conn.conn_id, cmd, body.len(), hex::encode(body));
                 let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(body.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
                 let mut send = conn.send.get().await;
@@ -394,7 +397,7 @@ impl<M: CmdTunnelMeta,
                 }
             }
             let ret: CmdResult<CmdBody> = async move {
-                log::trace!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, data_ref.len());
+                log::debug!("send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, data_ref.len());
                 let seq = gen_seq();
                 let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(data_ref.len() as u64).unwrap());
                 let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
@@ -483,9 +486,9 @@ impl<M: CmdTunnelMeta,
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
+            log::debug!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
         }
-        log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
+        log::debug!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
         let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(len as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         if buf.len() > 255 {
@@ -516,9 +519,9 @@ impl<M: CmdTunnelMeta,
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
+            log::debug!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}", peer_id, conn.conn_id, cmd, hex::encode(b));
         }
-        log::trace!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
+        log::debug!("send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}", peer_id, conn.conn_id, cmd, len);
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(len as u64).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
@@ -547,7 +550,7 @@ impl<M: CmdTunnelMeta,
         }
         let conn = conn.unwrap();
         assert_eq!(tunnel_id, conn.conn_id);
-        log::trace!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, body.len());
+        log::debug!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, body.len());
         let header = CmdHeader::<LEN, CMD>::new(version, false, None, cmd, LEN::from_u64(body.len()).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
         let mut send = conn.send.get().await;
@@ -573,7 +576,7 @@ impl<M: CmdTunnelMeta,
             }
         }
         assert_eq!(tunnel_id, conn.conn_id);
-        log::trace!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, body.len());
+        log::debug!("send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}", peer_id, conn.conn_id, cmd, body.len());
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(version, false, Some(seq), cmd, LEN::from_u64(body.len()).unwrap());
         let buf = header.to_vec().map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
