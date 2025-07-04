@@ -432,11 +432,12 @@ impl<C: WorkerClassification,
                         _ => {}
                     }
                     recv = future.await.map_err(into_cmd_err!(CmdErrorCode::Failed))??;
+                    log::debug!("handle cmd {:?} from {} len {} tunnel {:?} complete", cmd_code, peer_id, body_len, tunnel_id);
                 }
                 Ok(())
             }.await;
             if ret.is_err() {
-                log::error!("recv cmd error: {:?}", ret.as_ref().unwrap());
+                log::error!("recv cmd error: {:?}", ret.as_ref().err().unwrap());
             }
             ret
         });

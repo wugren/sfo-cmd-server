@@ -193,7 +193,7 @@ impl<M: CmdTunnelMeta,
                             Ok(())
                         }.await;
                         if ret.is_err() {
-                            log::error!("recv cmd error: {:?}", ret.as_ref().unwrap());
+                            log::error!("recv cmd error: {:?}", ret.as_ref().err().unwrap());
                         }
                         ret
                     });
