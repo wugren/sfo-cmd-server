@@ -1,9 +1,9 @@
-use async_named_locker::ObjectHolder;
-use sfo_split::WHalf;
-use tokio::task::JoinHandle;
 use crate::errors::CmdResult;
 use crate::peer_id::PeerId;
 use crate::tunnel_id::TunnelId;
+use async_named_locker::ObjectHolder;
+use sfo_split::WHalf;
+use tokio::task::JoinHandle;
 
 pub struct PeerConnection<R, W> {
     pub conn_id: TunnelId,

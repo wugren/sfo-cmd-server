@@ -1,7 +1,7 @@
+use bucky_raw_codec::{RawDecode, RawEncode};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use bucky_raw_codec::{RawDecode, RawEncode};
 
 #[derive(Clone, Copy, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
 pub struct TunnelId(u32);
@@ -12,7 +12,10 @@ impl TunnelId {
     }
 
     fn now(_now: u64) -> u32 {
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as u32;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
         let since_2021 = Duration::from_secs((50 * 365 + 9) * 24 * 3600).as_secs() as u32;
         // TODO: 用10年？
         (now - since_2021) * 10
@@ -62,19 +65,22 @@ pub struct TunnelIdGenerator {
     cur: AtomicU32,
 }
 
-
 impl From<TunnelId> for TunnelIdGenerator {
     fn from(init: TunnelId) -> Self {
         Self {
-            cur: AtomicU32::new(init.value())
+            cur: AtomicU32::new(init.value()),
         }
     }
 }
 
-
 impl TunnelIdGenerator {
     pub fn new() -> Self {
-        let now = TunnelId::now(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
+        let now = TunnelId::now(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
         Self {
             cur: AtomicU32::new(now),
         }
@@ -87,5 +93,38 @@ impl TunnelIdGenerator {
         } else {
             TunnelId(v)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TunnelId, TunnelIdGenerator};
+
+    #[test]
+    fn generator_skips_zero_and_increments() {
+        let generator = TunnelIdGenerator::from(TunnelId::from(0));
+        let first = generator.generate();
+        let second = generator.generate();
+        let third = generator.generate();
+
+        assert_eq!(first.value(), 1);
+        assert_eq!(second.value(), 2);
+        assert_eq!(third.value(), 3);
+    }
+
+    #[test]
+    fn partial_ord_wrap_around_behavior() {
+        let near_max = TunnelId::from(u32::MAX - 10);
+        let small = TunnelId::from(10);
+        assert!(near_max < small);
+        assert!(small > near_max);
+    }
+
+    #[test]
+    fn partial_ord_zero_follows_natural_order() {
+        let zero = TunnelId::from(0);
+        let one = TunnelId::from(1);
+        assert!(zero < one);
+        assert!(one > zero);
     }
 }

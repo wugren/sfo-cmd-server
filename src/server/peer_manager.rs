@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use crate::{CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
 use crate::server::CmdServerEventListener;
 use crate::tunnel_id::{TunnelId, TunnelIdGenerator};
+use crate::{CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct CachedPeerInfo {
@@ -19,7 +19,6 @@ pub struct PeerManager<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<
     _p: std::marker::PhantomData<M>,
 }
 pub type PeerManagerRef<M, R, W> = Arc<PeerManager<M, R, W>>;
-
 
 impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M, R, W> {
     pub fn new(listener: Arc<dyn CmdServerEventListener>) -> PeerManagerRef<M, R, W> {
@@ -41,9 +40,16 @@ impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M,
         let peer_id = conn.peer_id.clone();
         let conn_id = conn.conn_id;
         let conn_count = {
-            self.conn_cache.lock().unwrap().insert(conn_id, (peer_id.clone(), Arc::new(conn)));
+            self.conn_cache
+                .lock()
+                .unwrap()
+                .insert(conn_id, (peer_id.clone(), Arc::new(conn)));
             let mut device_conn_map = self.device_conn_map.lock().unwrap();
-            let peer_info = device_conn_map.entry(peer_id.clone()).or_insert(CachedPeerInfo { conn_list: Vec::new() });
+            let peer_info = device_conn_map
+                .entry(peer_id.clone())
+                .or_insert(CachedPeerInfo {
+                    conn_list: Vec::new(),
+                });
             peer_info.conn_list.push(conn_id);
             peer_info.conn_list.len()
         };
@@ -74,7 +80,10 @@ impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M,
             }
         }
         if peer_id.is_some() {
-            let _ = self.listener.on_peer_disconnected(peer_id.as_ref().unwrap()).await;
+            let _ = self
+                .listener
+                .on_peer_disconnected(peer_id.as_ref().unwrap())
+                .await;
         }
     }
 
@@ -86,9 +95,15 @@ impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M,
     pub fn find_connections(&self, device_id: &PeerId) -> Vec<Arc<PeerConnection<R, W>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         let device_conn_map = self.device_conn_map.lock().unwrap();
-        device_conn_map.get(device_id).map(|conns| {
-            conns.conn_list.iter().filter_map(|c| conn_cache.get(c).map(|c| c.1.clone())).collect()
-        }).unwrap_or_default()
+        device_conn_map
+            .get(device_id)
+            .map(|conns| {
+                conns
+                    .conn_list
+                    .iter()
+                    .filter_map(|c| conn_cache.get(c).map(|c| c.1.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
-
 }

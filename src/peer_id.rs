@@ -1,7 +1,7 @@
-use std::fmt::{Debug, Display, Formatter};
+use crate::errors::{CmdError, CmdErrorCode, CmdResult, cmd_err};
 use base58::{FromBase58, ToBase58};
 use bucky_raw_codec::{RawDecode, RawEncode};
-use crate::errors::{cmd_err, CmdError, CmdErrorCode, CmdResult};
+use std::fmt::{Debug, Display, Formatter};
 
 pub trait ToBase36 {
     fn to_base36(&self) -> String;
@@ -36,7 +36,9 @@ impl PeerId {
     }
 
     pub fn from_base58(base58: &str) -> CmdResult<Self> {
-        Ok(Self(base58.from_base58().map_err(|_| cmd_err!(CmdErrorCode::InvalidParam, "invalid peer id {}", base58))?))
+        Ok(Self(base58.from_base58().map_err(|_| {
+            cmd_err!(CmdErrorCode::InvalidParam, "invalid peer id {}", base58)
+        })?))
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -73,5 +75,36 @@ impl From<&[u8]> for PeerId {
 impl From<Vec<u8>> for PeerId {
     fn from(key: Vec<u8>) -> Self {
         Self(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerId;
+
+    #[test]
+    fn base58_round_trip() {
+        let raw = vec![1u8, 2, 3, 4, 5, 250, 251, 252];
+        let id = PeerId::from(raw.clone());
+        let decoded = PeerId::from_base58(&id.to_base58()).unwrap();
+        assert_eq!(decoded.as_slice(), raw.as_slice());
+    }
+
+    #[test]
+    fn base36_round_trip() {
+        let raw = vec![9u8, 8, 7, 6, 5, 4, 3, 2];
+        let id = PeerId::from(raw.clone());
+        let decoded = PeerId::from_base36(&id.to_base36()).unwrap();
+        assert_eq!(decoded.as_slice(), raw.as_slice());
+    }
+
+    #[test]
+    fn invalid_base58_rejected() {
+        assert!(PeerId::from_base58("***invalid***").is_err());
+    }
+
+    #[test]
+    fn invalid_base36_rejected() {
+        assert!(PeerId::from_base36("not@base36").is_err());
     }
 }
