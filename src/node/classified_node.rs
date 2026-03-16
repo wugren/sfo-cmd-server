@@ -509,7 +509,8 @@ impl<
         let write_factory = ClassifiedCmdNodeWriteFactory::<C, M, R, W, _, LEN, CMD, LISTENER>::new(
             factory,
             listener,
-            move |peer_id: PeerId,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
                   tunnel_id: TunnelId,
                   header: CmdHeader<LEN, CMD>,
                   body_read: CmdBody| {
@@ -523,7 +524,9 @@ impl<
                         Ok(None)
                     } else {
                         if let Some(handler) = handler_map.get(header.cmd_code()) {
-                            handler.handle(peer_id, tunnel_id, header, body_read).await
+                            handler
+                                .handle(local_id, peer_id, tunnel_id, header, body_read)
+                                .await
                         } else {
                             Ok(None)
                         }

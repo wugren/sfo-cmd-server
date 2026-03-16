@@ -29,6 +29,7 @@ fn peer(seed: u8) -> PeerId {
 }
 
 struct MockRead {
+    local_id: PeerId,
     remote_id: PeerId,
     read: tokio::io::ReadHalf<DuplexStream>,
 }
@@ -44,12 +45,17 @@ impl AsyncRead for MockRead {
 }
 
 impl sfo_cmd_server::CmdTunnelRead<()> for MockRead {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
 }
 
 struct MockWrite {
+    local_id: PeerId,
     remote_id: PeerId,
     write: tokio::io::WriteHalf<DuplexStream>,
 }
@@ -73,12 +79,17 @@ impl AsyncWrite for MockWrite {
 }
 
 impl sfo_cmd_server::CmdTunnelWrite<()> for MockWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
 }
 
 struct MockClassifiedRead {
+    local_id: PeerId,
     remote_id: PeerId,
     class: TestClass,
     read: tokio::io::ReadHalf<DuplexStream>,
@@ -95,6 +106,10 @@ impl AsyncRead for MockClassifiedRead {
 }
 
 impl sfo_cmd_server::CmdTunnelRead<()> for MockClassifiedRead {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -107,6 +122,7 @@ impl ClassifiedCmdTunnelRead<TestClass, ()> for MockClassifiedRead {
 }
 
 struct MockClassifiedWrite {
+    local_id: PeerId,
     remote_id: PeerId,
     class: TestClass,
     write: tokio::io::WriteHalf<DuplexStream>,
@@ -131,6 +147,10 @@ impl AsyncWrite for MockClassifiedWrite {
 }
 
 impl sfo_cmd_server::CmdTunnelWrite<()> for MockClassifiedWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -279,20 +299,24 @@ async fn wire_normal_connection(
 
     let client_tunnel = CmdTunnel::new(
         MockRead {
+            local_id: client_id.clone(),
             remote_id: server_id.clone(),
             read: client_read,
         },
         MockWrite {
-            remote_id: server_id,
+            local_id: client_id.clone(),
+            remote_id: server_id.clone(),
             write: client_write,
         },
     );
     let server_tunnel = CmdTunnel::new(
         MockRead {
+            local_id: server_id.clone(),
             remote_id: client_id.clone(),
             read: server_read,
         },
         MockWrite {
+            local_id: server_id,
             remote_id: client_id,
             write: server_write,
         },
@@ -315,23 +339,27 @@ async fn wire_classified_connection(
 
     let client_tunnel = CmdTunnel::new(
         MockClassifiedRead {
+            local_id: client_id.clone(),
             remote_id: server_id.clone(),
             class,
             read: client_read,
         },
         MockClassifiedWrite {
-            remote_id: server_id,
+            local_id: client_id.clone(),
+            remote_id: server_id.clone(),
             class,
             write: client_write,
         },
     );
     let server_tunnel = CmdTunnel::new(
         MockClassifiedRead {
+            local_id: server_id.clone(),
             remote_id: client_id.clone(),
             class,
             read: server_read,
         },
         MockClassifiedWrite {
+            local_id: server_id,
             remote_id: client_id,
             class,
             write: server_write,
@@ -385,7 +413,7 @@ async fn default_client_server_bidirectional_request_response_and_timeout() {
     let (server_recv_tx, mut server_recv_rx) = mpsc::unbounded_channel::<String>();
     server.register_cmd_handler(
         0x11,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
             let server_recv_tx = server_recv_tx.clone();
             async move {
                 server_recv_tx.send(body.into_string().await?).unwrap();
@@ -398,7 +426,7 @@ async fn default_client_server_bidirectional_request_response_and_timeout() {
     let (client_recv_tx, mut client_recv_rx) = mpsc::unbounded_channel::<String>();
     client.register_cmd_handler(
         0x12,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
             let client_recv_tx = client_recv_tx.clone();
             async move {
                 client_recv_tx.send(body.into_string().await?).unwrap();
@@ -445,7 +473,7 @@ async fn classified_client_server_communication() {
     );
     server.register_cmd_handler(
         0x21,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "server-classified-reply".to_owned(),
             )))
@@ -463,7 +491,7 @@ async fn classified_client_server_communication() {
     >::new(client_factory, 2);
     client.register_cmd_handler(
         0x22,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "client-classified-reply".to_owned(),
             )))
@@ -519,7 +547,7 @@ async fn default_node_server_bidirectional_request_response() {
     let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
     server.register_cmd_handler(
         0x31,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string("server-node-reply".to_owned())))
         },
     );
@@ -531,7 +559,7 @@ async fn default_node_server_bidirectional_request_response() {
     );
     node.register_cmd_handler(
         0x32,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string("node-reply".to_owned())))
         },
     );
@@ -574,7 +602,7 @@ async fn classified_node_server_communication() {
     );
     server.register_cmd_handler(
         0x41,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "server-class-node-reply".to_owned(),
             )))
@@ -593,7 +621,7 @@ async fn classified_node_server_communication() {
     >::new(node_listener, node_factory, 4);
     node.register_cmd_handler(
         0x42,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "classified-node-reply".to_owned(),
             )))
@@ -667,7 +695,7 @@ async fn default_client_interfaces_covered() {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -686,7 +714,7 @@ async fn default_client_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -696,7 +724,7 @@ async fn default_client_interfaces_covered() {
     let (client_tunnel_tx, mut client_tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     client.register_cmd_handler(
         0x70,
-        move |_peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
             let client_tunnel_tx = client_tunnel_tx.clone();
             async move {
                 client_tunnel_tx.send(tunnel_id).unwrap();
@@ -836,7 +864,7 @@ async fn server_interfaces_covered() {
         let tx = client_recv_tx.clone();
         client.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -856,7 +884,7 @@ async fn server_interfaces_covered() {
     ] {
         client.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -1003,7 +1031,7 @@ async fn default_node_interfaces_covered() {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -1022,7 +1050,7 @@ async fn default_node_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -1036,7 +1064,7 @@ async fn default_node_interfaces_covered() {
     let (node_tunnel_tx, mut node_tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     node.register_cmd_handler(
         0x70,
-        move |_peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
             let node_tunnel_tx = node_tunnel_tx.clone();
             async move {
                 node_tunnel_tx.send(tunnel_id).unwrap();
@@ -1190,7 +1218,7 @@ async fn classified_interfaces_covered() {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -1216,7 +1244,7 @@ async fn classified_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -1244,7 +1272,7 @@ async fn classified_interfaces_covered() {
     >::new(node_listener, node_factory, 2);
     node.register_cmd_handler(
         0xA0,
-        move |_peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| async move {
             let text = body.into_string().await?;
             Ok(Some(CmdBody::from_string(format!("node-{}", text))))
         },

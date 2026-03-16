@@ -20,16 +20,19 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 struct TlsStreamRead {
+    local_id: PeerId,
     remote_id: PeerId,
     read: Option<tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamRead {
     pub fn new(
+        local_id: PeerId,
         remote_id: PeerId,
         read: tokio::io::ReadHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
     ) -> Self {
         Self {
+            local_id,
             remote_id,
             read: Some(read),
         }
@@ -52,22 +55,29 @@ impl AsyncRead for TlsStreamRead {
 }
 
 impl CmdTunnelRead<()> for TlsStreamRead {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
 }
 
 struct TlsStreamWrite {
+    local_id: PeerId,
     remote_id: PeerId,
     write: Option<tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamWrite {
     pub fn new(
+        local_id: PeerId,
         remote_id: PeerId,
         write: tokio::io::WriteHalf<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
     ) -> Self {
         Self {
+            local_id,
             remote_id,
             write: Some(write),
         }
@@ -108,6 +118,10 @@ impl AsyncWrite for TlsStreamWrite {
 }
 
 impl CmdTunnelWrite<()> for TlsStreamWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -160,6 +174,7 @@ impl ClientCertVerifier for TlsClientCertVerifier {
     }
 }
 struct TunnelListener {
+    local_id: PeerId,
     tls_acceptor: TlsAcceptor,
     tcp_listener: TcpListener,
 }
@@ -179,6 +194,9 @@ impl TunnelListener {
             .await
             .map_err(into_cmd_err!(CmdErrorCode::IoError, "bind failed"))?;
         let (certs, key) = generate_cert();
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(certs[0].as_ref());
+        let local_id = PeerId::from(sha256.finalize().to_vec());
         let config = ServerConfig::builder_with_provider(ring::default_provider().into())
             .with_protocol_versions(&[&TLS13])
             .unwrap()
@@ -189,6 +207,7 @@ impl TunnelListener {
                 "create tls config failed"
             ))?;
         Ok(Self {
+            local_id,
             tls_acceptor: TlsAcceptor::from(Arc::new(config)),
             tcp_listener: listener,
         })
@@ -222,8 +241,8 @@ impl CmdTunnelListener<(), TlsStreamRead, TlsStreamWrite> for TunnelListener {
         let peer_id = PeerId::from(sha256.finalize().as_slice().to_vec());
         let (r, w) = split(tls_stream);
         Ok(CmdTunnel::new(
-            TlsStreamRead::new(peer_id.clone(), r),
-            TlsStreamWrite::new(peer_id, w),
+            TlsStreamRead::new(self.local_id.clone(), peer_id.clone(), r),
+            TlsStreamWrite::new(self.local_id.clone(), peer_id, w),
         ))
     }
 }
@@ -235,7 +254,7 @@ async fn main() {
     let sender = server.clone();
     server.register_cmd_handler(
         0x01,
-        move |peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body_read| {
+        move |_local_id, peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body_read| {
             let sender = sender.clone();
             async move {
                 sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
@@ -267,12 +286,23 @@ async fn main() {
         },
     );
 
-    server.register_cmd_handler(0x03, move |_peer_id, _tunnel_id, header: CmdHeader<u16, u8>, mut _body_read: CmdBody| {
-        async move {
-            println!("recv cmd {} body {}", header.cmd_code(), _body_read.into_string().await?);
-            Ok(Some(CmdBody::from_string("server resp 0x03".to_string())))
-        }
-    });
+    server.register_cmd_handler(
+        0x03,
+        move |_local_id,
+              _peer_id,
+              _tunnel_id,
+              header: CmdHeader<u16, u8>,
+              mut _body_read: CmdBody| {
+            async move {
+                println!(
+                    "recv cmd {} body {}",
+                    header.cmd_code(),
+                    _body_read.into_string().await?
+                );
+                Ok(Some(CmdBody::from_string("server resp 0x03".to_string())))
+            }
+        },
+    );
     server.start();
     tokio::signal::ctrl_c().await.unwrap();
 }

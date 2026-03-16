@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "as-any",
  "async-named-locker",

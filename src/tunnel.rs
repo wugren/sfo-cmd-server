@@ -12,6 +12,7 @@ impl<T: Send + Sync + 'static> CmdTunnelMeta for T {}
 pub trait CmdTunnelRead<M: CmdTunnelMeta>:
     Send + AsyncRead + 'static + Unpin + Any + AsAny
 {
+    fn get_local_peer_id(&self) -> PeerId;
     fn get_remote_peer_id(&self) -> PeerId;
     fn get_tunnel_meta(&self) -> Option<Arc<M>> {
         None
@@ -21,6 +22,7 @@ pub trait CmdTunnelRead<M: CmdTunnelMeta>:
 pub trait CmdTunnelWrite<M: CmdTunnelMeta>:
     AsyncWrite + Send + 'static + Unpin + Any + AsAny
 {
+    fn get_local_peer_id(&self) -> PeerId;
     fn get_remote_peer_id(&self) -> PeerId;
     fn get_tunnel_meta(&self) -> Option<Arc<M>> {
         None

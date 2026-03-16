@@ -612,6 +612,7 @@ impl<
         let peer_id = tunnel.get_remote_peer_id();
         let tunnel_id = self.tunnel_id_generator.generate();
         let (mut recv, write) = tunnel.split();
+        let local_id = recv.get_local_peer_id();
         let remote_id = write.get_remote_peer_id();
         let meta = write.get_tunnel_meta();
         let write = ObjectHolder::new(write);
@@ -652,6 +653,7 @@ impl<
                     let cmd_code = header.cmd_code();
                     match cmd_handler
                         .handle(
+                            local_id.clone(),
                             peer_id.clone(),
                             tunnel_id,
                             header,
@@ -787,7 +789,8 @@ impl<
                 tunnel_count,
                 CmdWriteFactory::<M, R, W, _, LEN, CMD>::new(
                     factory,
-                    move |peer_id: PeerId,
+                    move |local_id: PeerId,
+                          peer_id: PeerId,
                           tunnel_id: TunnelId,
                           header: CmdHeader<LEN, CMD>,
                           body_read: CmdBody| {
@@ -804,7 +807,9 @@ impl<
                                 Ok(None)
                             } else {
                                 if let Some(handler) = handler_map.get(header.cmd_code()) {
-                                    handler.handle(peer_id, tunnel_id, header, body_read).await
+                                    handler
+                                        .handle(local_id, peer_id, tunnel_id, header, body_read)
+                                        .await
                                 } else {
                                     Ok(None)
                                 }

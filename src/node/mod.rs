@@ -279,6 +279,7 @@ pub(crate) fn create_recv_handle<
 ) -> JoinHandle<CmdResult<()>> {
     let recv_handle = tokio::spawn(async move {
         let ret: CmdResult<()> = async move {
+            let local_id = reader.get_local_peer_id();
             let remote_id = reader.get_remote_peer_id();
             loop {
                 log::trace!("tunnel {:?} enter recv proc", tunnel_id);
@@ -318,6 +319,7 @@ pub(crate) fn create_recv_handle<
                     let body_read = cmd_read;
                     match cmd_handler
                         .handle(
+                            local_id.clone(),
                             remote_id.clone(),
                             tunnel_id,
                             header,

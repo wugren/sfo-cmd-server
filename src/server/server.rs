@@ -145,6 +145,7 @@ impl<
         let resp_waiter = self.resp_waiter.clone();
         let state_holder = self.state_holder.clone();
         let (mut reader, writer) = tunnel.split();
+        let local_id = reader.get_local_peer_id();
         let writer = ObjectHolder::new(writer);
         let resp_write = writer.clone();
         let remote_id = peer_id.clone();
@@ -185,7 +186,13 @@ impl<
                             match {
                                 let _handle_state = state_holder.new_state(tokio::task::id());
                                 handler
-                                    .handle(remote_id.clone(), tunnel_id, header, body)
+                                    .handle(
+                                        local_id.clone(),
+                                        remote_id.clone(),
+                                        tunnel_id,
+                                        header,
+                                        body,
+                                    )
                                     .await
                             } {
                                 Ok(Some(mut body)) => {

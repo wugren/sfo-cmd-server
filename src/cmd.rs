@@ -212,6 +212,7 @@ where
 {
     async fn handle(
         &self,
+        local_id: PeerId,
         peer_id: PeerId,
         tunnel_id: TunnelId,
         header: CmdHeader<LEN, CMD>,
@@ -448,6 +449,10 @@ mod tests {
     }
 
     impl CmdTunnelRead<()> for TestRead {
+        fn get_local_peer_id(&self) -> PeerId {
+            PeerId::from(vec![9; 32])
+        }
+
         fn get_remote_peer_id(&self) -> PeerId {
             PeerId::from(vec![1; 32])
         }
@@ -479,6 +484,10 @@ mod tests {
     }
 
     impl CmdTunnelWrite<()> for TestWrite {
+        fn get_local_peer_id(&self) -> PeerId {
+            PeerId::from(vec![9; 32])
+        }
+
         fn get_remote_peer_id(&self) -> PeerId {
             PeerId::from(vec![2; 32])
         }

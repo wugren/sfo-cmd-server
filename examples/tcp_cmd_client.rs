@@ -18,16 +18,19 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, split};
 use tokio_rustls::TlsConnector;
 
 struct TlsStreamRead {
+    local_id: PeerId,
     remote_id: PeerId,
     read: Option<tokio::io::ReadHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamRead {
     pub fn new(
+        local_id: PeerId,
         remote_id: PeerId,
         read: tokio::io::ReadHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     ) -> Self {
         Self {
+            local_id,
             remote_id,
             read: Some(read),
         }
@@ -50,22 +53,29 @@ impl AsyncRead for TlsStreamRead {
 }
 
 impl CmdTunnelRead<()> for TlsStreamRead {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
 }
 
 struct TlsStreamWrite {
+    local_id: PeerId,
     remote_id: PeerId,
     write: Option<tokio::io::WriteHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>,
 }
 
 impl TlsStreamWrite {
     pub fn new(
+        local_id: PeerId,
         remote_id: PeerId,
         write: tokio::io::WriteHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     ) -> Self {
         Self {
+            local_id,
             remote_id,
             write: Some(write),
         }
@@ -106,6 +116,10 @@ impl AsyncWrite for TlsStreamWrite {
 }
 
 impl CmdTunnelWrite<()> for TlsStreamWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
     fn get_remote_peer_id(&self) -> PeerId {
         self.remote_id.clone()
     }
@@ -185,12 +199,16 @@ impl ServerCertVerifier for TlsServerCertVerifier {
     }
 }
 pub struct TlsConnectionFactory {
+    local_id: PeerId,
     tls_connector: TlsConnector,
 }
 
 impl TlsConnectionFactory {
     pub fn new() -> Self {
         let (certs, key) = generate_cert();
+        let mut sha256 = sha2::Sha256::new();
+        sha256.update(certs[0].as_ref());
+        let local_id = PeerId::from(sha256.finalize().to_vec());
         let config = ClientConfig::builder_with_provider(ring::default_provider().into())
             .with_protocol_versions(&[&TLS13])
             .unwrap()
@@ -199,6 +217,7 @@ impl TlsConnectionFactory {
             .with_client_auth_cert(certs, key)
             .unwrap();
         Self {
+            local_id,
             tls_connector: TlsConnector::from(Arc::new(config)),
         }
     }
@@ -231,8 +250,8 @@ impl CmdTunnelFactory<(), TlsStreamRead, TlsStreamWrite> for TlsConnectionFactor
         let peer_id = PeerId::from(sha256.finalize().as_slice().to_vec());
         let (r, w) = split(tls_stream);
         Ok(CmdTunnel::new(
-            TlsStreamRead::new(peer_id.clone(), r),
-            TlsStreamWrite::new(peer_id, w),
+            TlsStreamRead::new(self.local_id.clone(), peer_id.clone(), r),
+            TlsStreamWrite::new(self.local_id.clone(), peer_id, w),
         ))
     }
 }
@@ -245,7 +264,7 @@ async fn main() {
 
     client.register_cmd_handler(
         0x02,
-        move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| async move {
+        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body| async move {
             println!("recv cmd {}", header.cmd_code());
             Ok(None)
         },
@@ -253,7 +272,7 @@ async fn main() {
 
     client.register_cmd_handler(
         0x06,
-        move |peer_id, tunnel_id, header: CmdHeader<u16, u8>, body| async move {
+        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body| async move {
             println!("recv cmd {}", header.cmd_code());
             Ok(Some(CmdBody::from_string("client resp 6".to_string())))
         },
