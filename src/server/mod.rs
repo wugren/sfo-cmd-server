@@ -33,9 +33,14 @@ pub trait CmdServer<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[&[u8]])
-    -> CmdResult<()>;
-    async fn send2_with_resp(
+    async fn send_parts(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()>;
+    async fn send_parts_with_resp(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -43,6 +48,28 @@ pub trait CmdServer<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts instead")]
+    async fn send2(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts(peer_id, cmd, version, body).await
+    }
+    #[deprecated(note = "use send_parts_with_resp instead")]
+    async fn send2_with_resp(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_with_resp(peer_id, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd(
         &self,
         peer_id: &PeerId,
@@ -75,7 +102,7 @@ pub trait CmdServer<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -83,7 +110,7 @@ pub trait CmdServer<
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -92,6 +119,31 @@ pub trait CmdServer<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_specify_tunnel instead")]
+    async fn send2_by_specify_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_specify_tunnel_with_resp instead")]
+    async fn send2_by_specify_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
@@ -116,11 +168,22 @@ pub trait CmdServer<
         version: u8,
         body: &[u8],
     ) -> CmdResult<()>;
-    async fn send2_by_all_tunnels(
+    async fn send_parts_by_all_tunnels(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
+    #[deprecated(note = "use send_parts_by_all_tunnels instead")]
+    async fn send2_by_all_tunnels(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_all_tunnels(peer_id, cmd, version, body)
+            .await
+    }
 }

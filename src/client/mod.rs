@@ -49,14 +49,28 @@ pub trait CmdClient<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
-    async fn send2_with_resp(
+    async fn send_parts(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()>;
+    async fn send_parts_with_resp(
         &self,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts instead")]
+    async fn send2(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
+        self.send_parts(cmd, version, body).await
+    }
+    #[deprecated(note = "use send_parts_with_resp instead")]
+    async fn send2_with_resp(
+        &self,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_with_resp(cmd, version, body, timeout).await
+    }
     async fn send_cmd(&self, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()>;
     async fn send_cmd_with_resp(
         &self,
@@ -80,14 +94,14 @@ pub trait CmdClient<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         tunnel_id: TunnelId,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         tunnel_id: TunnelId,
         cmd: CMD,
@@ -95,6 +109,29 @@ pub trait CmdClient<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_specify_tunnel instead")]
+    async fn send2_by_specify_tunnel(
+        &self,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_specify_tunnel(tunnel_id, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_specify_tunnel_with_resp instead")]
+    async fn send2_by_specify_tunnel_with_resp(
+        &self,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_specify_tunnel_with_resp(tunnel_id, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd_by_specify_tunnel(
         &self,
         tunnel_id: TunnelId,
@@ -147,14 +184,14 @@ pub trait ClassifiedCmdClient<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_classified_tunnel(
+    async fn send_parts_by_classified_tunnel(
         &self,
         classification: C,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_classified_tunnel_with_resp(
+    async fn send_parts_by_classified_tunnel_with_resp(
         &self,
         classification: C,
         cmd: CMD,
@@ -162,6 +199,29 @@ pub trait ClassifiedCmdClient<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_classified_tunnel instead")]
+    async fn send2_by_classified_tunnel(
+        &self,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_classified_tunnel(classification, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_classified_tunnel_with_resp instead")]
+    async fn send2_by_classified_tunnel_with_resp(
+        &self,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_classified_tunnel_with_resp(classification, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd_by_classified_tunnel(
         &self,
         classification: C,

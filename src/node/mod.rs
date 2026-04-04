@@ -49,9 +49,14 @@ pub trait CmdNode<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[&[u8]])
-    -> CmdResult<()>;
-    async fn send2_with_resp(
+    async fn send_parts(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()>;
+    async fn send_parts_with_resp(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -59,6 +64,28 @@ pub trait CmdNode<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts instead")]
+    async fn send2(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts(peer_id, cmd, version, body).await
+    }
+    #[deprecated(note = "use send_parts_with_resp instead")]
+    async fn send2_with_resp(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_with_resp(peer_id, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd(
         &self,
         peer_id: &PeerId,
@@ -91,7 +118,7 @@ pub trait CmdNode<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -99,7 +126,7 @@ pub trait CmdNode<
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -108,6 +135,31 @@ pub trait CmdNode<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_specify_tunnel instead")]
+    async fn send2_by_specify_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_specify_tunnel_with_resp instead")]
+    async fn send2_by_specify_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
@@ -162,14 +214,14 @@ pub trait ClassifiedCmdNode<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_classified_tunnel(
+    async fn send_parts_by_classified_tunnel(
         &self,
         classification: C,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_classified_tunnel_with_resp(
+    async fn send_parts_by_classified_tunnel_with_resp(
         &self,
         classification: C,
         cmd: CMD,
@@ -177,6 +229,29 @@ pub trait ClassifiedCmdNode<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_classified_tunnel instead")]
+    async fn send2_by_classified_tunnel(
+        &self,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_classified_tunnel(classification, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_classified_tunnel_with_resp instead")]
+    async fn send2_by_classified_tunnel_with_resp(
+        &self,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_classified_tunnel_with_resp(classification, cmd, version, body, timeout)
+            .await
+    }
     async fn send_cmd_by_classified_tunnel(
         &self,
         classification: C,
@@ -209,7 +284,7 @@ pub trait ClassifiedCmdNode<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
-    async fn send2_by_peer_classified_tunnel(
+    async fn send_parts_by_peer_classified_tunnel(
         &self,
         peer_id: &PeerId,
         classification: C,
@@ -217,7 +292,7 @@ pub trait ClassifiedCmdNode<
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()>;
-    async fn send2_by_peer_classified_tunnel_with_resp(
+    async fn send_parts_by_peer_classified_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         classification: C,
@@ -226,6 +301,38 @@ pub trait ClassifiedCmdNode<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody>;
+    #[deprecated(note = "use send_parts_by_peer_classified_tunnel instead")]
+    async fn send2_by_peer_classified_tunnel(
+        &self,
+        peer_id: &PeerId,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.send_parts_by_peer_classified_tunnel(peer_id, classification, cmd, version, body)
+            .await
+    }
+    #[deprecated(note = "use send_parts_by_peer_classified_tunnel_with_resp instead")]
+    async fn send2_by_peer_classified_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        classification: C,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_by_peer_classified_tunnel_with_resp(
+            peer_id,
+            classification,
+            cmd,
+            version,
+            body,
+            timeout,
+        )
+        .await
+    }
     async fn send_cmd_by_peer_classified_tunnel(
         &self,
         peer_id: &PeerId,

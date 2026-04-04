@@ -468,7 +468,7 @@ impl<
         ))
     }
 
-    async fn send2(
+    async fn send_parts(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -544,7 +544,7 @@ impl<
             .unwrap_or_else(|| cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id)))
     }
 
-    async fn send2_with_resp(
+    async fn send_parts_with_resp(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -900,7 +900,7 @@ impl<
         Ok(body)
     }
 
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -967,7 +967,7 @@ impl<
         Ok(())
     }
 
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -1232,7 +1232,7 @@ impl<
         Ok(())
     }
 
-    async fn send2_by_all_tunnels(
+    async fn send_parts_by_all_tunnels(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -1465,17 +1465,17 @@ impl<
             .await
     }
 
-    async fn send2(
+    async fn send_parts(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()> {
-        self.service.send2(peer_id, cmd, version, body).await
+        self.service.send_parts(peer_id, cmd, version, body).await
     }
 
-    async fn send2_with_resp(
+    async fn send_parts_with_resp(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -1484,7 +1484,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         self.service
-            .send2_with_resp(peer_id, cmd, version, body, timeout)
+            .send_parts_with_resp(peer_id, cmd, version, body, timeout)
             .await
     }
 
@@ -1538,7 +1538,7 @@ impl<
             .await
     }
 
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -1547,11 +1547,11 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         self.service
-            .send2_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .send_parts_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
             .await
     }
 
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -1561,7 +1561,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         self.service
-            .send2_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .send_parts_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
             .await
     }
 
@@ -1604,7 +1604,7 @@ impl<
             .await
     }
 
-    async fn send2_by_all_tunnels(
+    async fn send_parts_by_all_tunnels(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -1612,7 +1612,7 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         self.service
-            .send2_by_all_tunnels(peer_id, cmd, version, body)
+            .send_parts_by_all_tunnels(peer_id, cmd, version, body)
             .await
     }
 }

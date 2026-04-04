@@ -248,7 +248,7 @@ where
         Ok(resp)
     }
 
-    pub async fn send2(&mut self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
+    pub async fn send_parts(&mut self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
@@ -283,7 +283,7 @@ where
         Ok(())
     }
 
-    pub async fn send2_with_resp(
+    pub async fn send_parts_with_resp(
         &mut self,
         cmd: CMD,
         version: u8,
@@ -342,6 +342,24 @@ where
             .await
             .map_err(into_cmd_err!(CmdErrorCode::Timeout, "recv resp error"))?;
         Ok(resp)
+    }
+
+    #[allow(deprecated)]
+    #[deprecated(note = "use send_parts instead")]
+    pub async fn send2(&mut self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
+        self.send_parts(cmd, version, body).await
+    }
+
+    #[allow(deprecated)]
+    #[deprecated(note = "use send_parts_with_resp instead")]
+    pub async fn send2_with_resp(
+        &mut self,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     pub async fn send_cmd(&mut self, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()> {
@@ -1017,12 +1035,12 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
+    async fn send_parts(&self, cmd: CMD, version: u8, body: &[&[u8]]) -> CmdResult<()> {
         let mut send = self.get_send().await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_with_resp(
+    async fn send_parts_with_resp(
         &self,
         cmd: CMD,
         version: u8,
@@ -1030,7 +1048,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let mut send = self.get_send().await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd(&self, cmd: CMD, version: u8, body: CmdBody) -> CmdResult<()> {
@@ -1072,7 +1090,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         tunnel_id: TunnelId,
         cmd: CMD,
@@ -1080,10 +1098,10 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         tunnel_id: TunnelId,
         cmd: CMD,
@@ -1092,7 +1110,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let mut send = self.get_send_of_tunnel_id(tunnel_id).await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd_by_specify_tunnel(
@@ -1192,7 +1210,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2_by_classified_tunnel(
+    async fn send_parts_by_classified_tunnel(
         &self,
         classification: C,
         cmd: CMD,
@@ -1200,10 +1218,10 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         let mut send = self.get_classified_send(classification).await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_by_classified_tunnel_with_resp(
+    async fn send_parts_by_classified_tunnel_with_resp(
         &self,
         classification: C,
         cmd: CMD,
@@ -1212,7 +1230,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let mut send = self.get_classified_send(classification).await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd_by_classified_tunnel(

@@ -713,7 +713,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2(
+    async fn send_parts(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -721,10 +721,10 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         let mut send = self.get_send(peer_id.clone()).await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_with_resp(
+    async fn send_parts_with_resp(
         &self,
         peer_id: &PeerId,
         cmd: CMD,
@@ -733,7 +733,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let mut send = self.get_send(peer_id.clone()).await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd(
@@ -788,7 +788,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2_by_specify_tunnel(
+    async fn send_parts_by_specify_tunnel(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -799,10 +799,10 @@ impl<
         let mut send = self
             .get_send_of_tunnel_id(peer_id.clone(), tunnel_id)
             .await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_by_specify_tunnel_with_resp(
+    async fn send_parts_by_specify_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
@@ -814,7 +814,7 @@ impl<
         let mut send = self
             .get_send_of_tunnel_id(peer_id.clone(), tunnel_id)
             .await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd_by_specify_tunnel(
@@ -924,7 +924,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2_by_classified_tunnel(
+    async fn send_parts_by_classified_tunnel(
         &self,
         classification: C,
         cmd: CMD,
@@ -932,10 +932,10 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         let mut send = self.get_classified_send(classification).await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_by_classified_tunnel_with_resp(
+    async fn send_parts_by_classified_tunnel_with_resp(
         &self,
         classification: C,
         cmd: CMD,
@@ -944,7 +944,7 @@ impl<
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let mut send = self.get_classified_send(classification).await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd_by_classified_tunnel(
@@ -999,7 +999,7 @@ impl<
         send.send_with_resp(cmd, version, body, timeout).await
     }
 
-    async fn send2_by_peer_classified_tunnel(
+    async fn send_parts_by_peer_classified_tunnel(
         &self,
         peer_id: &PeerId,
         classification: C,
@@ -1010,10 +1010,10 @@ impl<
         let mut send = self
             .get_peer_classified_send(peer_id.clone(), classification)
             .await?;
-        send.send2(cmd, version, body).await
+        send.send_parts(cmd, version, body).await
     }
 
-    async fn send2_by_peer_classified_tunnel_with_resp(
+    async fn send_parts_by_peer_classified_tunnel_with_resp(
         &self,
         peer_id: &PeerId,
         classification: C,
@@ -1025,7 +1025,7 @@ impl<
         let mut send = self
             .get_peer_classified_send(peer_id.clone(), classification)
             .await?;
-        send.send2_with_resp(cmd, version, body, timeout).await
+        send.send_parts_with_resp(cmd, version, body, timeout).await
     }
 
     async fn send_cmd_by_peer_classified_tunnel(
