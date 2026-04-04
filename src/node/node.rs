@@ -58,7 +58,7 @@ where
     }
 
     fn classification(&self) -> (PeerId, Option<TunnelId>) {
-        (self.remote_id.clone(), Some(self.tunnel_id))
+        (self.remote_id.clone(), None)
     }
 }
 

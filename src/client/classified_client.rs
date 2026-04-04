@@ -83,9 +83,12 @@ where
     pub(crate) write: ObjectHolder<ClassifiedCmdTunnelWHalf<R, W>>,
     pub(crate) is_work: bool,
     pub(crate) classification: C,
+    pub(crate) pool_tunnel_id: Option<TunnelId>,
+    pub(crate) pool_classification: Option<C>,
     pub(crate) tunnel_id: TunnelId,
     pub(crate) resp_waiter: RespWaiterRef,
     pub(crate) remote_id: PeerId,
+    pub(crate) pool_peer_id: Option<PeerId>,
     pub(crate) tunnel_meta: Option<Arc<M>>,
     _p: std::marker::PhantomData<(LEN, CMD)>,
 }
@@ -122,6 +125,9 @@ where
     pub(crate) fn new(
         tunnel_id: TunnelId,
         classification: C,
+        pool_peer_id: Option<PeerId>,
+        pool_tunnel_id: Option<TunnelId>,
+        pool_classification: Option<C>,
         recv_handle: JoinHandle<CmdResult<()>>,
         write: ObjectHolder<ClassifiedCmdTunnelWHalf<R, W>>,
         resp_waiter: RespWaiterRef,
@@ -133,9 +139,12 @@ where
             write,
             is_work: true,
             classification,
+            pool_tunnel_id,
+            pool_classification,
             tunnel_id,
             resp_waiter,
             remote_id,
+            pool_peer_id,
             tunnel_meta,
             _p: Default::default(),
         }
@@ -148,6 +157,17 @@ where
     pub fn set_disable(&mut self) {
         self.is_work = false;
         self.recv_handle.abort();
+    }
+
+    pub(crate) fn set_pool_key(
+        &mut self,
+        peer_id: Option<PeerId>,
+        tunnel_id: Option<TunnelId>,
+        classification: Option<C>,
+    ) {
+        self.pool_peer_id = peer_id;
+        self.pool_tunnel_id = tunnel_id;
+        self.pool_classification = classification;
     }
 
     pub async fn send(&mut self, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()> {
@@ -555,8 +575,8 @@ where
 
     fn classification(&self) -> CmdClientTunnelClassification<C> {
         CmdClientTunnelClassification {
-            tunnel_id: Some(self.tunnel_id),
-            classification: Some(self.classification.clone()),
+            tunnel_id: self.pool_tunnel_id,
+            classification: self.pool_classification.clone(),
         }
     }
 }
@@ -634,19 +654,23 @@ impl<
             ));
         }
 
-        let classification = if classification.is_some()
-            && classification.as_ref().unwrap().classification.is_some()
-        {
-            classification.unwrap().classification
-        } else {
-            None
-        };
+        let requested_classification = classification;
+        let classification = requested_classification
+            .as_ref()
+            .and_then(|key| key.classification.clone());
         let tunnel = self
             .tunnel_factory
             .create_tunnel(classification)
             .await
             .map_err(into_pool_err!(PoolErrorCode::Failed))?;
         let classification = tunnel.get_classification();
+        let pool_tunnel_id = requested_classification
+            .as_ref()
+            .and_then(|key| key.tunnel_id);
+        let pool_classification = requested_classification
+            .as_ref()
+            .and_then(|key| key.classification.clone())
+            .or(Some(classification.clone()));
         let peer_id = tunnel.get_remote_peer_id();
         let tunnel_id = self.tunnel_id_generator.generate();
         let (mut recv, write) = tunnel.split();
@@ -761,6 +785,9 @@ impl<
         Ok(ClassifiedCmdSend::new(
             tunnel_id,
             classification,
+            None,
+            pool_tunnel_id,
+            pool_classification,
             handle,
             write,
             self.resp_waiter.clone(),

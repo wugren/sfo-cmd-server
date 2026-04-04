@@ -2,19 +2,23 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
+use num::{FromPrimitive, ToPrimitive};
 use sfo_cmd_server::client::{
     ClassifiedCmdClient, ClassifiedCmdTunnelFactory, ClassifiedCmdTunnelRead,
     ClassifiedCmdTunnelWrite, CmdClient, CmdSend, CmdTunnelFactory, DefaultClassifiedCmdClient,
     DefaultCmdClient,
 };
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, cmd_err};
-use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
+use sfo_cmd_server::server::{
+    CmdServer, CmdTunnelListener, DefaultCmdServer, DefaultCmdServerService,
+};
 use sfo_cmd_server::{
     ClassifiedCmdNode, ClassifiedCmdNodeTunnelFactory, CmdBody, CmdHeader, CmdNode,
     CmdNodeTunnelClassification, CmdNodeTunnelFactory, CmdTunnel, DefaultClassifiedCmdNode,
     DefaultCmdNode, PeerId, TunnelId,
 };
-use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf, split};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, split};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 
@@ -79,6 +83,59 @@ impl AsyncWrite for MockWrite {
 }
 
 impl sfo_cmd_server::CmdTunnelWrite<()> for MockWrite {
+    fn get_local_peer_id(&self) -> PeerId {
+        self.local_id.clone()
+    }
+
+    fn get_remote_peer_id(&self) -> PeerId {
+        self.remote_id.clone()
+    }
+}
+
+struct MaybeFailWrite {
+    local_id: PeerId,
+    remote_id: PeerId,
+    fail_writes: bool,
+    write: tokio::io::WriteHalf<DuplexStream>,
+}
+
+impl AsyncWrite for MaybeFailWrite {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.fail_writes {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected write failure",
+            )));
+        }
+        Pin::new(&mut self.write).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.fail_writes {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected flush failure",
+            )));
+        }
+        Pin::new(&mut self.write).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.fail_writes {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected shutdown failure",
+            )));
+        }
+        Pin::new(&mut self.write).poll_shutdown(cx)
+    }
+}
+
+impl sfo_cmd_server::CmdTunnelWrite<()> for MaybeFailWrite {
     fn get_local_peer_id(&self) -> PeerId {
         self.local_id.clone()
     }
@@ -164,6 +221,11 @@ impl ClassifiedCmdTunnelWrite<TestClass, ()> for MockClassifiedWrite {
 
 type NormalTunnel = CmdTunnel<MockRead, MockWrite>;
 type ClassifiedTunnel = CmdTunnel<MockClassifiedRead, MockClassifiedWrite>;
+
+struct PeerProbe {
+    read: tokio::io::ReadHalf<DuplexStream>,
+    write: tokio::io::WriteHalf<DuplexStream>,
+}
 
 #[derive(Clone)]
 struct NormalEndpoint {
@@ -326,6 +388,79 @@ async fn wire_normal_connection(
     client_tx.send(client_tunnel).await.unwrap();
 }
 
+async fn attach_normal_server_tunnel<LEN>(
+    server: &std::sync::Arc<DefaultCmdServerService<(), MockRead, MockWrite, LEN, u8>>,
+    client_id: PeerId,
+    server_id: PeerId,
+) -> PeerProbe
+where
+    LEN: RawEncode
+        + for<'de> RawDecode<'de>
+        + Copy
+        + RawFixedBytes
+        + Send
+        + Sync
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+{
+    let (client_stream, server_stream) = tokio::io::duplex(8 * 1024);
+    let (client_read, client_write) = split(client_stream);
+    let (server_read, server_write) = split(server_stream);
+
+    let server_tunnel = CmdTunnel::new(
+        MockRead {
+            local_id: server_id.clone(),
+            remote_id: client_id.clone(),
+            read: server_read,
+        },
+        MockWrite {
+            local_id: server_id,
+            remote_id: client_id,
+            write: server_write,
+        },
+    );
+
+    server.serve_tunnel(server_tunnel).await.unwrap();
+
+    PeerProbe {
+        read: client_read,
+        write: client_write,
+    }
+}
+
+async fn attach_failable_server_tunnel(
+    server: &std::sync::Arc<DefaultCmdServerService<(), MockRead, MaybeFailWrite, u16, u8>>,
+    client_id: PeerId,
+    server_id: PeerId,
+    fail_writes: bool,
+) -> PeerProbe {
+    let (client_stream, server_stream) = tokio::io::duplex(8 * 1024);
+    let (client_read, client_write) = split(client_stream);
+    let (server_read, server_write) = split(server_stream);
+
+    let server_tunnel = CmdTunnel::new(
+        MockRead {
+            local_id: server_id.clone(),
+            remote_id: client_id.clone(),
+            read: server_read,
+        },
+        MaybeFailWrite {
+            local_id: server_id,
+            remote_id: client_id,
+            fail_writes,
+            write: server_write,
+        },
+    );
+
+    server.serve_tunnel(server_tunnel).await.unwrap();
+
+    PeerProbe {
+        read: client_read,
+        write: client_write,
+    }
+}
+
 async fn wire_classified_connection(
     server_tx: &mpsc::Sender<ClassifiedTunnel>,
     client_tx: &mpsc::Sender<ClassifiedTunnel>,
@@ -399,6 +534,65 @@ async fn recv_tunnel_id(rx: &mut mpsc::UnboundedReceiver<TunnelId>) -> TunnelId 
         .await
         .expect("recv tunnel id timeout")
         .expect("tunnel id channel closed")
+}
+
+async fn read_frame<CMD>(probe: &mut PeerProbe) -> (CmdHeader<u16, CMD>, Vec<u8>)
+where
+    CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
+{
+    read_frame_with_len::<u16, CMD>(probe).await
+}
+
+async fn read_frame_with_len<LEN, CMD>(probe: &mut PeerProbe) -> (CmdHeader<LEN, CMD>, Vec<u8>)
+where
+    LEN: RawEncode
+        + for<'de> RawDecode<'de>
+        + Copy
+        + RawFixedBytes
+        + Send
+        + Sync
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
+{
+    let header_len = probe.read.read_u8().await.unwrap();
+    let mut header_buf = vec![0u8; header_len as usize];
+    probe.read.read_exact(&mut header_buf).await.unwrap();
+    let header = CmdHeader::<LEN, CMD>::clone_from_slice(&header_buf).unwrap();
+    let mut body = vec![0u8; header.pkg_len().to_u64().unwrap() as usize];
+    probe.read.read_exact(&mut body).await.unwrap();
+    (header, body)
+}
+
+async fn write_response_with_len<LEN, CMD>(
+    probe: &mut PeerProbe,
+    request: &CmdHeader<LEN, CMD>,
+    body: &[u8],
+) where
+    LEN: RawEncode
+        + for<'de> RawDecode<'de>
+        + Copy
+        + RawFixedBytes
+        + Send
+        + Sync
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
+{
+    let header = CmdHeader::<LEN, CMD>::new(
+        request.version(),
+        true,
+        request.seq(),
+        request.cmd_code(),
+        LEN::from_u64(body.len() as u64).unwrap(),
+    );
+    let header_buf = header.to_vec().unwrap();
+    probe.write.write_u8(header_buf.len() as u8).await.unwrap();
+    probe.write.write_all(&header_buf).await.unwrap();
+    probe.write.write_all(body).await.unwrap();
+    probe.write.flush().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1645,4 +1839,164 @@ async fn classified_interfaces_covered() {
     let node_guard = node.get_send(&node_peer, id1).await.unwrap();
     drop(node_guard);
     node.clear_all_tunnel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_send_variants_fail_without_connection() {
+    let missing_peer = peer(99);
+    let (server_listener, _server_tx) = NormalEndpoint::new();
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+
+    assert!(
+        server
+            .send(&missing_peer, 0x01, 1, b"missing")
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .send2(&missing_peer, 0x02, 1, &[b"A", b"B"])
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .send_cmd(
+                &missing_peer,
+                0x03,
+                1,
+                CmdBody::from_string("missing-cmd".to_owned()),
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .send_by_all_tunnels(&missing_peer, 0x04, 1, b"missing-all")
+            .await
+            .is_ok()
+    );
+    assert!(
+        server
+            .send2_by_all_tunnels(&missing_peer, 0x05, 1, &[b"A", b"L"])
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_send_failover_uses_next_tunnel_after_write_error() {
+    let client_id = peer(101);
+    let server_id = peer(102);
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+
+    let _failed_probe =
+        attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
+    let mut good_probe =
+        attach_failable_server_tunnel(&server, client_id.clone(), server_id, false).await;
+
+    server.send(&client_id, 0x41, 1, b"failover").await.unwrap();
+
+    let (header, body) = read_frame::<u8>(&mut good_probe).await;
+    assert_eq!(header.cmd_code(), 0x41);
+    assert_eq!(body, b"failover");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_send_returns_err_when_all_connected_tunnels_fail() {
+    let client_id = peer(103);
+    let server_id = peer(104);
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+
+    let _probe1 =
+        attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
+    let _probe2 = attach_failable_server_tunnel(&server, client_id.clone(), server_id, true).await;
+
+    let err = server
+        .send(&client_id, 0x42, 1, b"all-fail")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), CmdErrorCode::IoError);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_broadcast_is_best_effort_when_one_tunnel_fails() {
+    let client_id = peer(105);
+    let server_id = peer(106);
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+
+    let _failed_probe =
+        attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
+    let mut good_probe =
+        attach_failable_server_tunnel(&server, client_id.clone(), server_id, false).await;
+
+    server
+        .send_by_all_tunnels(&client_id, 0x43, 1, b"broadcast")
+        .await
+        .unwrap();
+    let (header, body) = read_frame::<u8>(&mut good_probe).await;
+    assert_eq!(header.cmd_code(), 0x43);
+    assert_eq!(body, b"broadcast");
+
+    server
+        .send2_by_all_tunnels(&client_id, 0x44, 1, &[b"broad", b"cast2"])
+        .await
+        .unwrap();
+    let (header, body) = read_frame::<u8>(&mut good_probe).await;
+    assert_eq!(header.cmd_code(), 0x44);
+    assert_eq!(body, b"broadcast2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_send_cmd_streams_large_body() {
+    let client_id = peer(107);
+    let server_id = peer(108);
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u32, u8>::new();
+    let mut probe = attach_normal_server_tunnel(&server, client_id.clone(), server_id).await;
+    let body = vec![0x5Au8; 256 * 1024];
+    let expected = body.clone();
+
+    let recv_task = tokio::spawn(async move {
+        let (header, recv_body) = read_frame_with_len::<u32, u8>(&mut probe).await;
+        assert_eq!(header.cmd_code(), 0x45);
+        assert_eq!(recv_body, expected);
+    });
+
+    server
+        .send_cmd(&client_id, 0x45, 1, CmdBody::from_bytes(body))
+        .await
+        .unwrap();
+
+    recv_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_send_cmd_with_resp_streams_large_body() {
+    let client_id = peer(109);
+    let server_id = peer(110);
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u32, u8>::new();
+    let mut probe = attach_normal_server_tunnel(&server, client_id.clone(), server_id).await;
+    let body = vec![0xA5u8; 256 * 1024];
+    let expected = body.clone();
+
+    let recv_task = tokio::spawn(async move {
+        let (header, recv_body) = read_frame_with_len::<u32, u8>(&mut probe).await;
+        assert_eq!(header.cmd_code(), 0x46);
+        assert_eq!(recv_body, expected);
+        write_response_with_len::<u32, u8>(&mut probe, &header, b"stream-ok").await;
+    });
+
+    let resp = server
+        .send_cmd_with_resp(
+            &client_id,
+            0x46,
+            1,
+            CmdBody::from_bytes(body),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.into_string().await.unwrap(), "stream-ok");
+
+    recv_task.await.unwrap();
 }

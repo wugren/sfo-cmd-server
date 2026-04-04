@@ -78,9 +78,9 @@ where
 
     fn classification(&self) -> CmdNodeTunnelClassification<C> {
         CmdNodeTunnelClassification {
-            peer_id: Some(self.remote_id.clone()),
-            tunnel_id: Some(self.tunnel_id),
-            classification: Some(self.classification.clone()),
+            peer_id: self.pool_peer_id.clone(),
+            tunnel_id: self.pool_tunnel_id,
+            classification: self.pool_classification.clone(),
         }
     }
 }
@@ -188,7 +188,10 @@ impl<
                         let send_list = send_cache.entry(peer_id).or_insert(Vec::new());
                         send_list.push(ClassifiedCmdSend::new(
                             tunnel_id,
-                            classification,
+                            classification.clone(),
+                            Some(remote_id.clone()),
+                            Some(tunnel_id),
+                            Some(classification),
                             recv_handle,
                             writer,
                             resp_waiter,
@@ -248,7 +251,12 @@ impl<
                             }
                         }
                         if let Some(send_index) = send_index {
-                            let send = send_list.remove(send_index);
+                            let mut send = send_list.remove(send_index);
+                            send.set_pool_key(
+                                Some(peer_id.clone()),
+                                tunnel_id,
+                                classification.classification.clone(),
+                            );
                             Ok(send)
                         } else {
                             Err(pool_err!(
@@ -269,7 +277,12 @@ impl<
                         let mut send_cache = self.send_cache.lock().unwrap();
                         if let Some(send_list) = send_cache.get_mut(&peer_id) {
                             if !send_list.is_empty() {
-                                let send = send_list.pop().unwrap();
+                                let mut send = send_list.pop().unwrap();
+                                send.set_pool_key(
+                                    Some(peer_id.clone()),
+                                    tunnel_id,
+                                    classification.classification.clone(),
+                                );
                                 if send_list.is_empty() {
                                     send_cache.remove(&peer_id);
                                 }
@@ -279,10 +292,13 @@ impl<
                     }
                     let tunnel = self
                         .tunnel_factory
-                        .create_tunnel(Some(classification))
+                        .create_tunnel(Some(classification.clone()))
                         .await
                         .map_err(into_pool_err!(PoolErrorCode::Failed))?;
-                    let classification = tunnel.get_classification();
+                    let actual_classification = tunnel.get_classification();
+                    let pool_peer_id = classification.peer_id.clone();
+                    let pool_tunnel_id = classification.tunnel_id;
+                    let pool_classification = classification.classification.clone();
                     let tunnel_id = self.tunnel_id_generator.generate();
                     let (recv, write) = tunnel.split();
                     let remote_id = write.get_remote_peer_id();
@@ -297,7 +313,10 @@ impl<
                     );
                     Ok(ClassifiedCmdSend::new(
                         tunnel_id,
-                        classification,
+                        actual_classification,
+                        pool_peer_id,
+                        pool_tunnel_id,
+                        pool_classification,
                         handle,
                         write,
                         self.resp_waiter.clone(),
@@ -314,10 +333,13 @@ impl<
                 } else {
                     let tunnel = self
                         .tunnel_factory
-                        .create_tunnel(Some(classification))
+                        .create_tunnel(Some(classification.clone()))
                         .await
                         .map_err(into_pool_err!(PoolErrorCode::Failed))?;
-                    let classification = tunnel.get_classification();
+                    let actual_classification = tunnel.get_classification();
+                    let pool_peer_id = classification.peer_id.clone();
+                    let pool_tunnel_id = classification.tunnel_id;
+                    let pool_classification = classification.classification.clone();
                     let tunnel_id = self.tunnel_id_generator.generate();
                     let (recv, write) = tunnel.split();
                     let remote_id = write.get_remote_peer_id();
@@ -332,7 +354,10 @@ impl<
                     );
                     Ok(ClassifiedCmdSend::new(
                         tunnel_id,
-                        classification,
+                        actual_classification,
+                        pool_peer_id,
+                        pool_tunnel_id,
+                        pool_classification,
                         handle,
                         write,
                         self.resp_waiter.clone(),

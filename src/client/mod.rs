@@ -192,13 +192,12 @@ pub(crate) fn gen_resp_id<
     seq: u32,
 ) -> u128 {
     let cmd_buf = cmd.raw_encode_to_buffer().unwrap();
-    let cmd = if cmd_buf.len() > 8 {
-        u64::from_be_bytes(cmd_buf[..8].try_into().unwrap())
-    } else {
+    let mut cmd = cmd_buf.len() as u64;
+    for chunk in cmd_buf.chunks(8) {
         let mut buf = [0u8; 8];
-        buf[..cmd_buf.len()].copy_from_slice(&cmd_buf);
-        u64::from_be_bytes(buf)
-    };
+        buf[..chunk.len()].copy_from_slice(chunk);
+        cmd = cmd.rotate_left(13) ^ u64::from_be_bytes(buf);
+    }
     ((tunnel_id.value() as u128) << 96) | ((seq as u128) << 64) | (cmd as u128)
 }
 
@@ -229,6 +228,21 @@ mod tests {
     fn resp_id_changes_with_tunnel() {
         let id1 = gen_resp_id(TunnelId::from(7), 0x11u8, 5);
         let id2 = gen_resp_id(TunnelId::from(8), 0x11u8, 5);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn resp_id_changes_with_long_cmd_suffix() {
+        let id1 = gen_resp_id(
+            TunnelId::from(7),
+            0x1122_3344_5566_7788_0000_0000_0000_0001u128,
+            5,
+        );
+        let id2 = gen_resp_id(
+            TunnelId::from(7),
+            0x1122_3344_5566_7788_0000_0000_0000_0002u128,
+            5,
+        );
         assert_ne!(id1, id2);
     }
 }

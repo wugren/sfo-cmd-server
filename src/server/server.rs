@@ -118,6 +118,17 @@ impl<
         + Debug,
 > DefaultCmdServerService<M, R, W, LEN, CMD>
 {
+    fn encode_pkg_len(len: u64) -> CmdResult<LEN> {
+        LEN::from_u64(len).ok_or_else(|| {
+            cmd_err!(
+                CmdErrorCode::InvalidParam,
+                "body len {} exceeds header len type {}",
+                len,
+                std::any::type_name::<LEN>()
+            )
+        })
+    }
+
     pub fn new() -> Arc<Self> {
         let event_emit = CmdServerEventListenerEmit::new();
         Arc::new(Self {
@@ -202,7 +213,7 @@ impl<
                                         true,
                                         seq,
                                         cmd_code,
-                                        LEN::from_u64(body.len()).unwrap(),
+                                        Self::encode_pkg_len(body.len())?,
                                     );
                                     let buf = header
                                         .to_vec()
@@ -323,6 +334,14 @@ impl<
 
     async fn send(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()> {
         let connections = self.peer_manager.find_connections(peer_id);
+        if connections.is_empty() {
+            return Err(cmd_err!(
+                CmdErrorCode::PeerConnectionNotFound,
+                "peer_id: {}",
+                peer_id
+            ));
+        }
+        let mut last_err = None;
         for conn in connections {
             let ret: CmdResult<()> = async move {
                 log::debug!(
@@ -338,7 +357,7 @@ impl<
                     false,
                     None,
                     cmd,
-                    LEN::from_u64(body.len() as u64).unwrap(),
+                    Self::encode_pkg_len(body.len() as u64)?,
                 );
                 let buf = header
                     .to_vec()
@@ -363,10 +382,12 @@ impl<
             }
             .await;
             if ret.is_ok() {
-                break;
+                return Ok(());
             }
+            last_err = ret.err();
         }
-        Ok(())
+        Err(last_err
+            .unwrap_or_else(|| cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id)))
     }
 
     async fn send_with_resp(
@@ -399,7 +420,7 @@ impl<
                     false,
                     Some(seq),
                     cmd,
-                    LEN::from_u64(body.len() as u64).unwrap(),
+                    Self::encode_pkg_len(body.len() as u64)?,
                 );
                 let buf = header
                     .to_vec()
@@ -455,6 +476,14 @@ impl<
         body: &[&[u8]],
     ) -> CmdResult<()> {
         let connections = self.peer_manager.find_connections(peer_id);
+        if connections.is_empty() {
+            return Err(cmd_err!(
+                CmdErrorCode::PeerConnectionNotFound,
+                "peer_id: {}",
+                peer_id
+            ));
+        }
+        let mut last_err = None;
         for conn in connections {
             let ret: CmdResult<()> = async move {
                 let mut len = 0;
@@ -480,7 +509,7 @@ impl<
                     false,
                     None,
                     cmd,
-                    LEN::from_u64(len as u64).unwrap(),
+                    Self::encode_pkg_len(len as u64)?,
                 );
                 let buf = header
                     .to_vec()
@@ -507,10 +536,12 @@ impl<
             }
             .await;
             if ret.is_ok() {
-                break;
+                return Ok(());
             }
+            last_err = ret.err();
         }
-        Ok(())
+        Err(last_err
+            .unwrap_or_else(|| cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id)))
     }
 
     async fn send2_with_resp(
@@ -553,7 +584,7 @@ impl<
                     false,
                     Some(seq),
                     cmd,
-                    LEN::from_u64(len as u64).unwrap(),
+                    Self::encode_pkg_len(len as u64)?,
                 );
                 let buf = header
                     .to_vec()
@@ -603,27 +634,33 @@ impl<
         peer_id: &PeerId,
         cmd: CMD,
         version: u8,
-        body: CmdBody,
+        mut body: CmdBody,
     ) -> CmdResult<()> {
-        let body_data = body.into_bytes().await?;
-        let body = body_data.as_slice();
         let connections = self.peer_manager.find_connections(peer_id);
+        if connections.is_empty() {
+            return Err(cmd_err!(
+                CmdErrorCode::PeerConnectionNotFound,
+                "peer_id: {}",
+                peer_id
+            ));
+        }
+        let mut last_err = None;
         for conn in connections {
-            let ret: CmdResult<()> = async move {
+            let ret: CmdResult<()> = async {
                 log::debug!(
                     "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}",
                     peer_id,
                     conn.conn_id,
                     cmd,
                     body.len(),
-                    hex::encode(body)
+                    "<streaming>"
                 );
                 let header = CmdHeader::<LEN, CMD>::new(
                     version,
                     false,
                     None,
                     cmd,
-                    LEN::from_u64(body.len() as u64).unwrap(),
+                    Self::encode_pkg_len(body.len() as u64)?,
                 );
                 let buf = header
                     .to_vec()
@@ -638,7 +675,7 @@ impl<
                 send.write_all(buf.as_slice())
                     .await
                     .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                send.write_all(body)
+                tokio::io::copy(&mut body, send.deref_mut().deref_mut())
                     .await
                     .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                 send.flush()
@@ -648,10 +685,12 @@ impl<
             }
             .await;
             if ret.is_ok() {
-                break;
+                return Ok(());
             }
+            last_err = ret.err();
         }
-        Ok(())
+        Err(last_err
+            .unwrap_or_else(|| cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id)))
     }
 
     async fn send_cmd_with_resp(
@@ -659,25 +698,31 @@ impl<
         peer_id: &PeerId,
         cmd: CMD,
         version: u8,
-        body: CmdBody,
+        mut body: CmdBody,
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
         let connections = self.peer_manager.find_connections(peer_id);
-        let body_data = body.into_bytes().await?;
-        let data_ref = body_data.as_slice();
+        if connections.is_empty() {
+            return Err(cmd_err!(
+                CmdErrorCode::PeerConnectionNotFound,
+                "peer_id: {}",
+                peer_id
+            ));
+        }
+        let mut last_err = None;
         for conn in connections {
             if let Some(id) = tokio::task::try_id() {
                 if self.state_holder.has_state(id) {
                     continue;
                 }
             }
-            let ret: CmdResult<CmdBody> = async move {
+            let ret: CmdResult<CmdBody> = async {
                 log::debug!(
                     "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}",
                     peer_id,
                     conn.conn_id,
                     cmd,
-                    data_ref.len()
+                    body.len()
                 );
                 let seq = gen_seq();
                 let header = CmdHeader::<LEN, CMD>::new(
@@ -685,7 +730,7 @@ impl<
                     false,
                     Some(seq),
                     cmd,
-                    LEN::from_u64(data_ref.len() as u64).unwrap(),
+                    Self::encode_pkg_len(body.len())?,
                 );
                 let buf = header
                     .to_vec()
@@ -706,7 +751,7 @@ impl<
                     send.write_all(buf.as_slice())
                         .await
                         .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                    send.write_all(data_ref)
+                    tokio::io::copy(&mut body, send.deref_mut().deref_mut())
                         .await
                         .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
                     send.flush()
@@ -720,12 +765,10 @@ impl<
             if ret.is_ok() {
                 return ret;
             }
+            last_err = ret.err();
         }
-        Err(cmd_err!(
-            CmdErrorCode::Failed,
-            "send to peer_id: {}",
-            peer_id
-        ))
+        Err(last_err
+            .unwrap_or_else(|| cmd_err!(CmdErrorCode::Failed, "send to peer_id: {}", peer_id)))
     }
 
     async fn send_by_specify_tunnel(
@@ -759,7 +802,7 @@ impl<
             false,
             None,
             cmd,
-            LEN::from_u64(body.len() as u64).unwrap(),
+            Self::encode_pkg_len(body.len() as u64)?,
         );
         let buf = header
             .to_vec()
@@ -825,7 +868,7 @@ impl<
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(body.len() as u64).unwrap(),
+            Self::encode_pkg_len(body.len() as u64)?,
         );
         let buf = header
             .to_vec()
@@ -898,7 +941,7 @@ impl<
             false,
             None,
             cmd,
-            LEN::from_u64(len as u64).unwrap(),
+            Self::encode_pkg_len(len as u64)?,
         );
         let buf = header
             .to_vec()
@@ -976,7 +1019,7 @@ impl<
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(len as u64).unwrap(),
+            Self::encode_pkg_len(len as u64)?,
         );
         let buf = header
             .to_vec()
@@ -1040,7 +1083,7 @@ impl<
             false,
             None,
             cmd,
-            LEN::from_u64(body.len()).unwrap(),
+            Self::encode_pkg_len(body.len())?,
         );
         let buf = header
             .to_vec()
@@ -1105,7 +1148,7 @@ impl<
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(body.len()).unwrap(),
+            Self::encode_pkg_len(body.len())?,
         );
         let buf = header
             .to_vec()
@@ -1145,18 +1188,21 @@ impl<
         body: &[u8],
     ) -> CmdResult<()> {
         let connections = self.peer_manager.find_connections(peer_id);
+        let header = CmdHeader::<LEN, CMD>::new(
+            version,
+            false,
+            None,
+            cmd,
+            Self::encode_pkg_len(body.len() as u64)?,
+        );
+        let buf = header
+            .to_vec()
+            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        if buf.len() > 255 {
+            return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+        }
         for conn in connections {
-            let _ret: CmdResult<()> = async move {
-                let header = CmdHeader::<LEN, CMD>::new(
-                    version,
-                    false,
-                    None,
-                    cmd,
-                    LEN::from_u64(body.len() as u64).unwrap(),
-                );
-                let buf = header
-                    .to_vec()
-                    .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+            let ret: CmdResult<()> = async {
                 let mut send = conn.send.get().await;
                 send.write_u8(buf.len() as u8)
                     .await
@@ -1173,6 +1219,15 @@ impl<
                 Ok(())
             }
             .await;
+            if let Err(e) = ret {
+                log::error!(
+                    "broadcast send failed peer_id: {}, tunnel_id: {:?}, cmd: {:?}, err: {:?}",
+                    peer_id,
+                    conn.conn_id,
+                    cmd,
+                    e
+                );
+            }
         }
         Ok(())
     }
@@ -1189,21 +1244,21 @@ impl<
         for b in body.iter() {
             len += b.len();
         }
+        let header = CmdHeader::<LEN, CMD>::new(
+            version,
+            false,
+            None,
+            cmd,
+            Self::encode_pkg_len(len as u64)?,
+        );
+        let buf = header
+            .to_vec()
+            .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+        if buf.len() > 255 {
+            return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
+        }
         for conn in connections {
-            let _ret: CmdResult<()> = async move {
-                let header = CmdHeader::<LEN, CMD>::new(
-                    version,
-                    false,
-                    None,
-                    cmd,
-                    LEN::from_u64(len as u64).unwrap(),
-                );
-                let buf = header
-                    .to_vec()
-                    .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                if buf.len() > 255 {
-                    return Err(cmd_err!(CmdErrorCode::InvalidParam, "header len too large"));
-                }
+            let ret: CmdResult<()> = async {
                 let mut send = conn.send.get().await;
                 send.write_u8(buf.len() as u8)
                     .await
@@ -1222,6 +1277,15 @@ impl<
                 Ok(())
             }
             .await;
+            if let Err(e) = ret {
+                log::error!(
+                    "broadcast send2 failed peer_id: {}, tunnel_id: {:?}, cmd: {:?}, err: {:?}",
+                    peer_id,
+                    conn.conn_id,
+                    cmd,
+                    e
+                );
+            }
         }
         Ok(())
     }
