@@ -730,6 +730,153 @@ async fn classified_client_server_communication() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_client_specified_tunnel_waits_for_busy_guard() {
+    let client_id = peer(13);
+    let server_id = peer(14);
+
+    let (server_listener, server_tx) = NormalEndpoint::new();
+    let (client_factory, client_tx) = NormalEndpoint::new();
+
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let (tunnel_tx, mut tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
+    let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
+    let recv_tx_23 = recv_tx.clone();
+    let recv_tx_24 = recv_tx.clone();
+
+    server.register_cmd_handler(
+        0x23,
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let tunnel_tx = tunnel_tx.clone();
+            let recv_tx = recv_tx_23.clone();
+            async move {
+                tunnel_tx.send(tunnel_id).unwrap();
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+    server.register_cmd_handler(
+        0x24,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_24.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+
+    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, u16, u8>::new(client_factory, 4);
+    server.start();
+    wire_normal_connection(&server_tx, &client_tx, client_id, server_id).await;
+
+    client.send(0x23, 1, b"seed").await.unwrap();
+    let tunnel_id = recv_tunnel_id(&mut tunnel_rx).await;
+    assert_eq!(recv_text(&mut recv_rx).await, "seed");
+
+    let guard = client.get_send(tunnel_id).await.unwrap();
+    let client_ref = client.clone();
+    let send_task = tokio::spawn(async move {
+        client_ref
+            .send_by_specify_tunnel(tunnel_id, 0x24, 1, b"waited")
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!send_task.is_finished());
+
+    drop(guard);
+    send_task.await.unwrap().unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "waited");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classified_client_specified_tunnel_waits_for_busy_classified_guard() {
+    let client_id = peer(15);
+    let server_id = peer(16);
+
+    let (server_listener, server_tx) = ClassifiedEndpoint::new();
+    let (client_factory, client_tx) = ClassifiedEndpoint::new();
+
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+        server_listener,
+    );
+    let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
+    let recv_tx_25 = recv_tx.clone();
+    let recv_tx_26 = recv_tx.clone();
+
+    server.register_cmd_handler(
+        0x25,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_25.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+    server.register_cmd_handler(
+        0x26,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_26.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+
+    let client = DefaultClassifiedCmdClient::<
+        TestClass,
+        (),
+        MockClassifiedRead,
+        MockClassifiedWrite,
+        _,
+        u16,
+        u8,
+    >::new(client_factory, 2);
+
+    server.start();
+    wire_classified_connection(
+        &server_tx,
+        &client_tx,
+        TestClass::Alpha,
+        client_id,
+        server_id,
+    )
+    .await;
+
+    client
+        .send_by_classified_tunnel(TestClass::Alpha, 0x25, 1, b"seed-classified")
+        .await
+        .unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "seed-classified");
+
+    let tunnel_id = client
+        .find_tunnel_id_by_classified(TestClass::Alpha)
+        .await
+        .unwrap();
+    let guard = client
+        .get_send_by_classified(TestClass::Alpha)
+        .await
+        .unwrap();
+
+    let client_ref = client.clone();
+    let send_task = tokio::spawn(async move {
+        client_ref
+            .send_by_specify_tunnel(tunnel_id, 0x26, 1, b"classified-waited")
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!send_task.is_finished());
+
+    drop(guard);
+    send_task.await.unwrap().unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "classified-waited");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_node_server_bidirectional_request_response() {
     let node_id = peer(21);
     let server_id = peer(22);
@@ -780,6 +927,79 @@ async fn default_node_server_bidirectional_request_response() {
         .await
         .unwrap();
     assert_eq!(resp.into_string().await.unwrap(), "node-reply");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_node_specified_tunnel_waits_for_busy_guard() {
+    let node_id = peer(23);
+    let server_id = peer(24);
+
+    let (server_listener, server_tx) = NormalEndpoint::new();
+    let (node_factory, node_factory_tx) = NormalEndpoint::new();
+    let (node_listener, _node_listener_tx) = NormalEndpoint::new();
+
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let (tunnel_tx, mut tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
+    let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
+    let recv_tx_33 = recv_tx.clone();
+    let recv_tx_34 = recv_tx.clone();
+    server.register_cmd_handler(
+        0x33,
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let tunnel_tx = tunnel_tx.clone();
+            let recv_tx = recv_tx_33.clone();
+            async move {
+                tunnel_tx.send(tunnel_id).unwrap();
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+    server.register_cmd_handler(
+        0x34,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_34.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+
+    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+        node_listener,
+        node_factory,
+        4,
+    );
+
+    server.start();
+    wire_normal_connection(
+        &server_tx,
+        &node_factory_tx,
+        node_id.clone(),
+        server_id.clone(),
+    )
+    .await;
+
+    node.send(&server_id, 0x33, 1, b"seed-node").await.unwrap();
+    let tunnel_id = recv_tunnel_id(&mut tunnel_rx).await;
+    assert_eq!(recv_text(&mut recv_rx).await, "seed-node");
+
+    let guard = node.get_send(&server_id, tunnel_id).await.unwrap();
+    let node_ref = node.clone();
+    let server_id_ref = server_id.clone();
+    let send_task = tokio::spawn(async move {
+        node_ref
+            .send_by_specify_tunnel(&server_id_ref, tunnel_id, 0x34, 1, b"node-waited")
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!send_task.is_finished());
+
+    drop(guard);
+    send_task.await.unwrap().unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "node-waited");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -874,6 +1094,95 @@ async fn classified_node_server_communication() {
         .await
         .unwrap();
     assert_eq!(resp.into_string().await.unwrap(), "server-class-node-reply");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classified_node_specified_tunnel_waits_for_busy_guard() {
+    let node_id = peer(25);
+    let server_id = peer(26);
+
+    let (server_listener, server_tx) = ClassifiedEndpoint::new();
+    let (node_factory, node_factory_tx) = ClassifiedEndpoint::new();
+    let (node_listener, _node_listener_tx) = ClassifiedEndpoint::new();
+
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+        server_listener,
+    );
+    let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
+    let recv_tx_35 = recv_tx.clone();
+    let recv_tx_36 = recv_tx.clone();
+    server.register_cmd_handler(
+        0x35,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_35.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+    server.register_cmd_handler(
+        0x36,
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            let recv_tx = recv_tx_36.clone();
+            async move {
+                recv_tx.send(body.into_string().await?).unwrap();
+                Ok(None)
+            }
+        },
+    );
+
+    let node = DefaultClassifiedCmdNode::<
+        TestClass,
+        (),
+        MockClassifiedRead,
+        MockClassifiedWrite,
+        _,
+        u16,
+        u8,
+        _,
+    >::new(node_listener, node_factory, 4);
+
+    server.start();
+    wire_classified_connection(
+        &server_tx,
+        &node_factory_tx,
+        TestClass::Beta,
+        node_id,
+        server_id.clone(),
+    )
+    .await;
+
+    node.send_by_classified_tunnel(TestClass::Beta, 0x35, 1, b"seed-node-classified")
+        .await
+        .unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "seed-node-classified");
+
+    let tunnel_id = node
+        .find_tunnel_id_by_classified(TestClass::Beta)
+        .await
+        .unwrap();
+    let guard = node.get_send_by_classified(TestClass::Beta).await.unwrap();
+    let node_ref = node.clone();
+    let server_id_ref = server_id.clone();
+    let send_task = tokio::spawn(async move {
+        node_ref
+            .send_by_specify_tunnel(
+                &server_id_ref,
+                tunnel_id,
+                0x36,
+                1,
+                b"node-classified-waited",
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!send_task.is_finished());
+
+    drop(guard);
+    send_task.await.unwrap().unwrap();
+    assert_eq!(recv_text(&mut recv_rx).await, "node-classified-waited");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

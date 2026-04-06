@@ -4,11 +4,16 @@ use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use callback_result::CallbackWaiter;
 pub use client::*;
 use num::{FromPrimitive, ToPrimitive};
-use sfo_pool::WorkerClassification;
+use sfo_pool::{
+    ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, WorkerClassification,
+};
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::ops::Deref;
-use std::sync::Arc;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 mod classified_client;
 pub use classified_client::*;
@@ -22,6 +27,208 @@ pub trait CmdSend<M: CmdTunnelMeta>: Send + 'static {
 }
 
 pub trait SendGuard<M: CmdTunnelMeta, S: CmdSend<M>>: Send + 'static + Deref<Target = S> {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TunnelBorrowState {
+    Idle,
+    Borrowed,
+}
+
+struct TunnelRuntimeEntry {
+    state: TunnelBorrowState,
+    waiters: VecDeque<Arc<Notify>>,
+}
+
+pub(crate) enum TunnelReserveResult {
+    Acquired,
+    Wait(Arc<Notify>),
+    Missing,
+}
+
+#[derive(Default)]
+pub(crate) struct TunnelRuntimeRegistry {
+    state: Mutex<HashMap<TunnelId, TunnelRuntimeEntry>>,
+}
+
+impl TunnelRuntimeRegistry {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn reserve_existing(&self, tunnel_id: TunnelId) -> TunnelReserveResult {
+        let mut state = self.state.lock().unwrap();
+        match state.get_mut(&tunnel_id) {
+            Some(entry) => match entry.state {
+                TunnelBorrowState::Idle => {
+                    entry.state = TunnelBorrowState::Borrowed;
+                    TunnelReserveResult::Acquired
+                }
+                TunnelBorrowState::Borrowed => {
+                    let notify = Arc::new(Notify::new());
+                    entry.waiters.push_back(notify.clone());
+                    TunnelReserveResult::Wait(notify)
+                }
+            },
+            None => TunnelReserveResult::Missing,
+        }
+    }
+
+    pub(crate) fn mark_borrowed(&self, tunnel_id: TunnelId) -> bool {
+        let mut state = self.state.lock().unwrap();
+        match state.get_mut(&tunnel_id) {
+            Some(entry) => match entry.state {
+                TunnelBorrowState::Idle => {
+                    entry.state = TunnelBorrowState::Borrowed;
+                    true
+                }
+                TunnelBorrowState::Borrowed => false,
+            },
+            None => {
+                state.insert(
+                    tunnel_id,
+                    TunnelRuntimeEntry {
+                        state: TunnelBorrowState::Borrowed,
+                        waiters: VecDeque::new(),
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    pub(crate) fn remove(&self, tunnel_id: TunnelId) {
+        let waiters = {
+            let mut state = self.state.lock().unwrap();
+            state
+                .remove(&tunnel_id)
+                .map(|entry| entry.waiters.into_iter().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        for waiter in waiters {
+            waiter.notify_one();
+        }
+    }
+
+    pub(crate) fn release(&self, tunnel_id: TunnelId, alive: bool) {
+        let (waiter, waiters) = {
+            let mut state = self.state.lock().unwrap();
+            match state.get_mut(&tunnel_id) {
+                Some(entry) if alive => {
+                    entry.state = TunnelBorrowState::Idle;
+                    (entry.waiters.pop_front(), Vec::new())
+                }
+                Some(_) => {
+                    let entry = state.remove(&tunnel_id).unwrap();
+                    (None, entry.waiters.into_iter().collect::<Vec<_>>())
+                }
+                None => (None, Vec::new()),
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.notify_one();
+        }
+        for waiter in waiters {
+            waiter.notify_one();
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        let waiters = {
+            let mut state = self.state.lock().unwrap();
+            state
+                .drain()
+                .flat_map(|(_, entry)| entry.waiters.into_iter())
+                .collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            waiter.notify_one();
+        }
+    }
+}
+
+pub struct TrackedSendGuard<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> {
+    worker_guard: Option<ClassifiedWorkerGuard<C, S, F>>,
+    runtime_tunnels: Arc<TunnelRuntimeRegistry>,
+    tunnel_id: TunnelId,
+    _p: PhantomData<M>,
+}
+
+impl<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> TrackedSendGuard<C, M, S, F>
+{
+    pub(crate) fn new(
+        worker_guard: ClassifiedWorkerGuard<C, S, F>,
+        runtime_tunnels: Arc<TunnelRuntimeRegistry>,
+        tunnel_id: TunnelId,
+    ) -> Self {
+        Self {
+            worker_guard: Some(worker_guard),
+            runtime_tunnels,
+            tunnel_id,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> Deref for TrackedSendGuard<C, M, S, F>
+{
+    type Target = S;
+
+    fn deref(&self) -> &Self::Target {
+        self.worker_guard.as_ref().unwrap().deref()
+    }
+}
+
+impl<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> DerefMut for TrackedSendGuard<C, M, S, F>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.worker_guard.as_mut().unwrap().deref_mut()
+    }
+}
+
+impl<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> Drop for TrackedSendGuard<C, M, S, F>
+{
+    fn drop(&mut self) {
+        if let Some(worker_guard) = self.worker_guard.take() {
+            let alive = worker_guard.is_work();
+            drop(worker_guard);
+            self.runtime_tunnels.release(self.tunnel_id, alive);
+        }
+    }
+}
+
+impl<
+    C: WorkerClassification,
+    M: CmdTunnelMeta,
+    S: ClassifiedWorker<C> + CmdSend<M>,
+    F: ClassifiedWorkerFactory<C, S>,
+> SendGuard<M, S> for TrackedSendGuard<C, M, S, F>
+{
+}
 
 #[async_trait::async_trait]
 pub trait CmdClient<

@@ -1,6 +1,6 @@
 use crate::client::{
-    ClassifiedCmdSend, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite, ClassifiedSendGuard,
-    RespWaiter, RespWaiterRef, gen_resp_id,
+    ClassifiedCmdSend, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite, RespWaiter,
+    RespWaiterRef, TrackedSendGuard, TunnelReserveResult, TunnelRuntimeRegistry, gen_resp_id,
 };
 use crate::cmd::CmdHandlerMap;
 use crate::errors::{CmdErrorCode, CmdResult, into_cmd_err};
@@ -23,6 +23,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::task::yield_now;
 
 #[derive(Debug, Clone, Eq, Hash)]
 pub struct CmdNodeTunnelClassification<C: WorkerClassification> {
@@ -495,6 +496,7 @@ pub struct DefaultClassifiedCmdNode<
         ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
         ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
     >,
+    runtime_tunnels: Arc<TunnelRuntimeRegistry>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
 
@@ -526,6 +528,10 @@ impl<
     LISTENER: CmdTunnelListener<M, R, W>,
 > DefaultClassifiedCmdNode<C, M, R, W, F, LEN, CMD, LISTENER>
 {
+    fn tunnel_not_found(tunnel_id: TunnelId) -> sfo_result::Error<CmdErrorCode> {
+        crate::errors::cmd_err!(CmdErrorCode::Failed, "tunnel {:?} not found", tunnel_id)
+    }
+
     pub fn new(listener: LISTENER, factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
@@ -563,94 +569,128 @@ impl<
         write_factory.start();
         Arc::new(Self {
             tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, write_factory),
+            runtime_tunnels: TunnelRuntimeRegistry::new(),
             cmd_handler_map,
         })
+    }
+
+    fn tracked_send_guard(
+        &self,
+        worker_guard: ClassifiedWorkerGuard<
+            CmdNodeTunnelClassification<C>,
+            ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
+            ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
+        >,
+    ) -> ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER> {
+        let tunnel_id = worker_guard.get_tunnel_id();
+        TrackedSendGuard::new(worker_guard, self.runtime_tunnels.clone(), tunnel_id)
+    }
+
+    async fn reserve_tunnel(&self, tunnel_id: TunnelId) -> CmdResult<()> {
+        loop {
+            match self.runtime_tunnels.reserve_existing(tunnel_id) {
+                TunnelReserveResult::Acquired => return Ok(()),
+                TunnelReserveResult::Wait(waiter) => waiter.notified().await,
+                TunnelReserveResult::Missing => return Err(Self::tunnel_not_found(tunnel_id)),
+            }
+        }
     }
 
     async fn get_send(
         &self,
         peer_id: PeerId,
-    ) -> CmdResult<
-        ClassifiedWorkerGuard<
-            CmdNodeTunnelClassification<C>,
-            ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
-            ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
-        >,
-    > {
-        self.tunnel_pool
-            .get_classified_worker(CmdNodeTunnelClassification {
-                peer_id: Some(peer_id),
-                tunnel_id: None,
-                classification: None,
-            })
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+    ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
+        loop {
+            let worker_guard = self
+                .tunnel_pool
+                .get_classified_worker(CmdNodeTunnelClassification {
+                    peer_id: Some(peer_id.clone()),
+                    tunnel_id: None,
+                    classification: None,
+                })
+                .await
+                .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
+            let tunnel_id = worker_guard.get_tunnel_id();
+            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+                return Ok(self.tracked_send_guard(worker_guard));
+            }
+            drop(worker_guard);
+            yield_now().await;
+        }
     }
 
     async fn get_send_of_tunnel_id(
         &self,
         peer_id: PeerId,
         tunnel_id: TunnelId,
-    ) -> CmdResult<
-        ClassifiedWorkerGuard<
-            CmdNodeTunnelClassification<C>,
-            ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
-            ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
-        >,
-    > {
-        self.tunnel_pool
+    ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
+        self.reserve_tunnel(tunnel_id).await?;
+        match self
+            .tunnel_pool
             .get_classified_worker(CmdNodeTunnelClassification {
                 peer_id: Some(peer_id),
                 tunnel_id: Some(tunnel_id),
                 classification: None,
             })
             .await
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+        {
+            Ok(worker_guard) => Ok(self.tracked_send_guard(worker_guard)),
+            Err(_) => {
+                self.runtime_tunnels.remove(tunnel_id);
+                Err(Self::tunnel_not_found(tunnel_id))
+            }
+        }
     }
 
     async fn get_classified_send(
         &self,
         classification: C,
-    ) -> CmdResult<
-        ClassifiedWorkerGuard<
-            CmdNodeTunnelClassification<C>,
-            ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
-            ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
-        >,
-    > {
-        self.tunnel_pool
-            .get_classified_worker(CmdNodeTunnelClassification {
-                peer_id: None,
-                tunnel_id: None,
-                classification: Some(classification),
-            })
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+    ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
+        loop {
+            let worker_guard = self
+                .tunnel_pool
+                .get_classified_worker(CmdNodeTunnelClassification {
+                    peer_id: None,
+                    tunnel_id: None,
+                    classification: Some(classification.clone()),
+                })
+                .await
+                .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
+            let tunnel_id = worker_guard.get_tunnel_id();
+            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+                return Ok(self.tracked_send_guard(worker_guard));
+            }
+            drop(worker_guard);
+            yield_now().await;
+        }
     }
 
     async fn get_peer_classified_send(
         &self,
         peer_id: PeerId,
         classification: C,
-    ) -> CmdResult<
-        ClassifiedWorkerGuard<
-            CmdNodeTunnelClassification<C>,
-            ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
-            ClassifiedCmdNodeWriteFactory<C, M, R, W, F, LEN, CMD, LISTENER>,
-        >,
-    > {
-        self.tunnel_pool
-            .get_classified_worker(CmdNodeTunnelClassification {
-                peer_id: Some(peer_id),
-                tunnel_id: None,
-                classification: Some(classification),
-            })
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))
+    ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
+        loop {
+            let worker_guard = self
+                .tunnel_pool
+                .get_classified_worker(CmdNodeTunnelClassification {
+                    peer_id: Some(peer_id.clone()),
+                    tunnel_id: None,
+                    classification: Some(classification.clone()),
+                })
+                .await
+                .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
+            let tunnel_id = worker_guard.get_tunnel_id();
+            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+                return Ok(self.tracked_send_guard(worker_guard));
+            }
+            drop(worker_guard);
+            yield_now().await;
+        }
     }
 }
 
-pub type ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER> = ClassifiedSendGuard<
+pub type ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER> = TrackedSendGuard<
     CmdNodeTunnelClassification<C>,
     M,
     ClassifiedCmdSend<C, M, R, W, LEN, CMD>,
@@ -848,6 +888,7 @@ impl<
 
     async fn clear_all_tunnel(&self) {
         self.tunnel_pool.clear_all_worker().await;
+        self.runtime_tunnels.clear();
     }
 
     async fn get_send(
@@ -855,12 +896,7 @@ impl<
         peer_id: &PeerId,
         tunnel_id: TunnelId,
     ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
-        Ok(ClassifiedSendGuard {
-            worker_guard: self
-                .get_send_of_tunnel_id(peer_id.clone(), tunnel_id)
-                .await?,
-            _p: Default::default(),
-        })
+        self.get_send_of_tunnel_id(peer_id.clone(), tunnel_id).await
     }
 }
 
@@ -1077,10 +1113,7 @@ impl<
         &self,
         classification: C,
     ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
-        Ok(ClassifiedSendGuard {
-            worker_guard: self.get_classified_send(classification).await?,
-            _p: Default::default(),
-        })
+        self.get_classified_send(classification).await
     }
 
     async fn get_send_by_peer_classified(
@@ -1088,11 +1121,7 @@ impl<
         peer_id: &PeerId,
         classification: C,
     ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD, LISTENER>> {
-        Ok(ClassifiedSendGuard {
-            worker_guard: self
-                .get_peer_classified_send(peer_id.clone(), classification)
-                .await?,
-            _p: Default::default(),
-        })
+        self.get_peer_classified_send(peer_id.clone(), classification)
+            .await
     }
 }

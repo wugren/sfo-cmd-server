@@ -1,11 +1,12 @@
-# Client / Server 设计说明
+# Client / Node / Server 设计说明
 
 ## 1. 范围
 
-本文基于当前仓库实现，梳理 `sfo-cmd-server` 的 client/server 设计，覆盖：
+本文基于当前仓库实现，梳理 `sfo-cmd-server` 的 client/node/server 设计，覆盖：
 
 - 协议帧与 body 生命周期
 - 默认 client 与 classified client 的建连、收发、选路
+- 默认 node 与 classified node 的建连、收发、选路
 - server 的接入、连接管理、发送语义
 - 并发约束与已知实现风险
 - 当前测试覆盖
@@ -15,6 +16,8 @@
 - `src/cmd.rs`
 - `src/client/client.rs`
 - `src/client/classified_client.rs`
+- `src/node/node.rs`
+- `src/node/classified_node.rs`
 - `src/server/server.rs`
 - `src/server/peer_manager.rs`
 - `tests/communication_matrix.rs`
@@ -119,6 +122,68 @@
 - 两者都不指定：退化为任意可用 tunnel
 
 因此 classified client 本质上是在默认 client 之上增加“按分类建连/选路”的能力，没有引入新的协议语义。
+
+### 5.3 精确 tunnel 获取语义
+
+当前实现里，`client` 与 `node` 的“按指定 `tunnel_id` 精确获取”已经不再把“是否真实存在”的判断完全交给 `sfo-pool`。
+
+原因是：
+
+- `sfo-pool::get_classified_worker()` 只会在空闲 worker 列表里找匹配项
+- 如果目标 tunnel 正被别的 guard 持有，而池子又还没满，pool 会倾向于走 `factory.create(...)`
+- 对 `client` / `node` 的“精确 tunnel 复用”场景来说，这会把“存在但 busy”误判成 `tunnel not found`
+
+现在 `client` / `classified client` / `node` / `classified node` 都在上层维护了一份按真实 `tunnel_id` 索引的运行时表，状态只有两类：
+
+- `Idle`
+- `Borrowed`
+
+具体语义如下：
+
+- `get_send(..., tunnel_id)` / `send_by_specify_tunnel*`
+  - 运行时表里没有该 `tunnel_id`：直接返回 `tunnel not found`
+  - 运行时表里是 `Borrowed`：在库内部等待，不向上层误报错误
+  - 运行时表里是 `Idle`：预占为 `Borrowed` 后再去从 pool 获取
+
+- 通用获取路径
+  - `get_send()`
+  - `get_classified_send(...)`
+  - `get_peer_classified_send(...)`
+  - 这些路径在真正拿到 worker 后，会按实际 `tunnel_id` 把运行时表标成 `Borrowed`
+
+- guard 释放
+  - 若 worker 仍然存活：状态从 `Borrowed` 改回 `Idle`，唤醒等待者
+  - 若 worker 已失效：从运行时表删除该 `tunnel_id`，等待者下一轮会看到 `tunnel not found`
+
+- `clear_all_tunnel()`
+  - 除了清空 pool，还会清空运行时表并唤醒等待者，避免挂住
+
+因此，当前“按指定 tunnel 精确发送”的语义已经收敛为：
+
+- 真实不存在：返回 `tunnel not found`
+- 临时并发占用：等待归还
+
+这套逻辑只影响“精确 tunnel 复用”路径，不改变按分类或按 peer 的扩容语义。
+
+### 5.4 Node 说明
+
+`DefaultCmdNode` 与 `DefaultClassifiedCmdNode` 的核心模式与 client 相同，只是选路维度从“本地维护的一组 tunnel”扩展成了：
+
+- 默认 node：`(PeerId, Option<TunnelId>)`
+- classified node：`CmdNodeTunnelClassification { peer_id, tunnel_id, classification }`
+
+其中：
+
+- 不指定 `tunnel_id` 的路径仍允许按 `peer_id` / `classification` 复用空闲 tunnel，必要时新建
+- 指定 `tunnel_id` 的路径现在和 client 一样，遵循“存在但 busy 则等待，不存在才报错”的规则
+
+这保证了 node 场景下：
+
+- `send_by_specify_tunnel(...)`
+- `send_by_specify_tunnel_with_resp(...)`
+- `get_send(peer_id, tunnel_id)`
+
+不再因为临时并发占用误删或误判某条活跃 tunnel。
 
 ## 6. Server 设计
 
@@ -234,6 +299,7 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 - 同一条 tunnel 的读循环是串行的；一个 body 未完成消费前，不会进入下一帧。
 - 不同 tunnel 之间天然并行；每条 tunnel 各自有独立接收任务。
 - 同一条 tunnel 的写通过 `ObjectHolder` 串行化。
+- `client` / `node` 的“按指定 tunnel 精确发送”在 tunnel 已被借出时会等待已有 guard 归还，而不是把 busy 误判成 not found。
 - handler 可以只读取部分 body，但必须依赖 `CmdBodyRead` 的完成/自动 drain 机制恢复流状态。
 - 带响应的同步发送不能在“当前入站命令处理 task”里直接等待，否则会被 client/server 的保护逻辑拒绝。
 
@@ -248,6 +314,8 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 - default node / classified node 与 server 的互通
 - client、classified client、server、node 的主要发送接口矩阵
 - timeout 行为
+- `client` / `classified client` 指定 tunnel 在 busy 状态下的等待语义
+- `node` / `classified node` 指定 tunnel 在 busy 状态下的等待语义
 - missing peer 时各发送接口的返回语义
 - server 多 tunnel failover
 - broadcast 的 best-effort 语义
@@ -292,6 +360,16 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 
 如果某种 tunnel 实现的 read/write half 暴露出的 meta 不完全对称，调用方可见行为会不一致。
 
+### 10.5 运行时 tunnel 表是进程内状态，不是持久注册表
+
+`client` / `node` 当前依赖一份运行期维护的 `tunnel_id -> { Idle | Borrowed }` 表来区分“busy”与“not found”。
+
+这意味着：
+
+- 它只描述当前实例在本进程内已经见过并成功借出过的 tunnel
+- 它不是独立于 pool/连接生命周期的持久真值源
+- 如果后续再引入跨实例共享、外部恢复或更复杂的迁移语义，需要重新定义这张表和底层连接状态的同步方式
+
 ## 11. 建议
 
 后续如果要继续收敛语义，优先级建议如下：
@@ -300,3 +378,4 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 2. 明确 broadcast 是否要保持 best-effort；若保持，最好在命名或返回类型上体现。
 3. 为 `send_by_specify_tunnel*` 增加 `peer_id` 一致性校验，或在 API 文档里明确说明忽略 `peer_id`。
 4. 统一 `tunnel_meta` 的权威来源。
+5. 如果后续还要把“存在但 busy 则等待”的语义下沉到公共层，应考虑为 `sfo-pool` 增加新策略或新 API，而不是直接改掉现有 `get_classified_worker()` 的扩容语义。
