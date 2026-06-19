@@ -5,7 +5,7 @@ use crate::client::{
 use crate::cmd::CmdHandlerMap;
 use crate::errors::{CmdErrorCode, CmdResult, into_cmd_err};
 use crate::node::create_recv_handle;
-use crate::server::CmdTunnelListener;
+use crate::server::{CmdTunnelListener, CmdTunnelService};
 use crate::{
     CmdBody, CmdHandler, CmdHeader, CmdNode, CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite, PeerId,
     TunnelId, TunnelIdGenerator, into_pool_err, pool_err,
@@ -21,6 +21,8 @@ use sfo_split::Splittable;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::yield_now;
@@ -73,9 +75,7 @@ struct CmdWriteFactoryImpl<
     F: CmdNodeTunnelFactory<M, R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
-    LISTENER: CmdTunnelListener<M, R, W>,
 > {
-    tunnel_listener: LISTENER,
     tunnel_factory: F,
     cmd_handler: Arc<dyn CmdHandler<LEN, CMD>>,
     tunnel_id_generator: TunnelIdGenerator,
@@ -98,17 +98,14 @@ impl<
         + ToPrimitive
         + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
-    LISTENER: CmdTunnelListener<M, R, W>,
-> CmdWriteFactoryImpl<M, R, W, F, LEN, CMD, LISTENER>
+> CmdWriteFactoryImpl<M, R, W, F, LEN, CMD>
 {
     pub fn new(
         tunnel_factory: F,
-        tunnel_listener: LISTENER,
         cmd_handler: impl CmdHandler<LEN, CMD>,
         resp_waiter: RespWaiterRef,
     ) -> Self {
         Self {
-            tunnel_listener,
             tunnel_factory,
             cmd_handler: Arc::new(cmd_handler),
             tunnel_id_generator: TunnelIdGenerator::new(),
@@ -117,56 +114,30 @@ impl<
         }
     }
 
-    pub fn start(self: &Arc<Self>) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = this.run().await {
-                log::error!("cmd server error: {:?}", e);
-            }
-        });
-    }
-
-    async fn run(self: &Arc<Self>) -> CmdResult<()> {
-        loop {
-            let tunnel = self.tunnel_listener.accept().await?;
-            let peer_id = tunnel.get_remote_peer_id();
-            let tunnel_id = self.tunnel_id_generator.generate();
-            let resp_waiter = self.resp_waiter.clone();
-            let this = self.clone();
-            tokio::spawn(async move {
-                let ret: CmdResult<()> = async move {
-                    let this = this.clone();
-                    let cmd_handler = this.cmd_handler.clone();
-                    let (reader, writer) = tunnel.split();
-                    let remote_id = reader.get_remote_peer_id();
-                    let tunnel_meta = reader.get_tunnel_meta();
-                    let writer = ObjectHolder::new(writer);
-                    let recv_handle = create_recv_handle::<M, R, W, LEN, CMD>(
-                        reader,
-                        writer.clone(),
-                        tunnel_id,
-                        cmd_handler,
-                    );
-                    {
-                        let mut send_cache = this.send_cache.lock().unwrap();
-                        let send_list = send_cache.entry(peer_id).or_insert(Vec::new());
-                        send_list.push(CommonCmdSend::new(
-                            tunnel_id,
-                            recv_handle,
-                            writer,
-                            resp_waiter,
-                            remote_id,
-                            tunnel_meta,
-                        ));
-                    }
-                    Ok(())
-                }
-                .await;
-                if let Err(e) = ret {
-                    log::error!("peer connection error: {:?}", e);
-                }
-            });
+    pub async fn serve_tunnel(&self, tunnel: Splittable<R, W>) -> CmdResult<()> {
+        let peer_id = tunnel.get_remote_peer_id();
+        let tunnel_id = self.tunnel_id_generator.generate();
+        let resp_waiter = self.resp_waiter.clone();
+        let cmd_handler = self.cmd_handler.clone();
+        let (reader, writer) = tunnel.split();
+        let remote_id = reader.get_remote_peer_id();
+        let tunnel_meta = reader.get_tunnel_meta();
+        let writer = ObjectHolder::new(writer);
+        let recv_handle =
+            create_recv_handle::<M, R, W, LEN, CMD>(reader, writer.clone(), tunnel_id, cmd_handler);
+        {
+            let mut send_cache = self.send_cache.lock().unwrap();
+            let send_list = send_cache.entry(peer_id).or_insert(Vec::new());
+            send_list.push(CommonCmdSend::new(
+                tunnel_id,
+                recv_handle,
+                writer,
+                resp_waiter,
+                remote_id,
+                tunnel_meta,
+            ));
         }
+        Ok(())
     }
 }
 
@@ -186,9 +157,8 @@ impl<
         + ToPrimitive
         + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Debug,
-    LISTENER: CmdTunnelListener<M, R, W>,
 > ClassifiedWorkerFactory<(PeerId, Option<TunnelId>), CommonCmdSend<M, R, W, LEN, CMD>>
-    for CmdWriteFactoryImpl<M, R, W, F, LEN, CMD, LISTENER>
+    for CmdWriteFactoryImpl<M, R, W, F, LEN, CMD>
 {
     async fn create(
         &self,
@@ -275,9 +245,24 @@ pub struct CmdNodeWriteFactory<
     F: CmdNodeTunnelFactory<M, R, W>,
     LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
-    LISTENER: CmdTunnelListener<M, R, W>,
 > {
-    inner: Arc<CmdWriteFactoryImpl<M, R, W, F, LEN, CMD, LISTENER>>,
+    inner: Arc<CmdWriteFactoryImpl<M, R, W, F, LEN, CMD>>,
+}
+
+impl<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
+> Clone for CmdNodeWriteFactory<M, R, W, F, LEN, CMD>
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<
@@ -295,27 +280,24 @@ impl<
         + ToPrimitive
         + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
-    LISTENER: CmdTunnelListener<M, R, W>,
-> CmdNodeWriteFactory<M, R, W, F, LEN, CMD, LISTENER>
+> CmdNodeWriteFactory<M, R, W, F, LEN, CMD>
 {
     pub(crate) fn new(
         tunnel_factory: F,
-        tunnel_listener: LISTENER,
         cmd_handler: impl CmdHandler<LEN, CMD>,
         resp_waiter: RespWaiterRef,
     ) -> Self {
         Self {
             inner: Arc::new(CmdWriteFactoryImpl::new(
                 tunnel_factory,
-                tunnel_listener,
                 cmd_handler,
                 resp_waiter,
             )),
         }
     }
 
-    pub fn start(&self) {
-        self.inner.start();
+    pub async fn serve_tunnel(&self, tunnel: Splittable<R, W>) -> CmdResult<()> {
+        self.inner.serve_tunnel(tunnel).await
     }
 }
 
@@ -335,9 +317,8 @@ impl<
         + ToPrimitive
         + RawFixedBytes,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Debug,
-    LISTENER: CmdTunnelListener<M, R, W>,
 > ClassifiedWorkerFactory<(PeerId, Option<TunnelId>), CommonCmdSend<M, R, W, LEN, CMD>>
-    for CmdNodeWriteFactory<M, R, W, F, LEN, CMD, LISTENER>
+    for CmdNodeWriteFactory<M, R, W, F, LEN, CMD>
 {
     async fn create(
         &self,
@@ -346,7 +327,7 @@ impl<
         self.inner.create(c).await
     }
 }
-pub struct DefaultCmdNode<
+pub struct DefaultCmdNodeService<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
@@ -370,13 +351,13 @@ pub struct DefaultCmdNode<
         + Eq
         + Hash
         + Debug,
-    LISTENER: CmdTunnelListener<M, R, W>,
 > {
     tunnel_pool: ClassifiedWorkerPoolRef<
         (PeerId, Option<TunnelId>),
         CommonCmdSend<M, R, W, LEN, CMD>,
-        CmdNodeWriteFactory<M, R, W, F, LEN, CMD, LISTENER>,
+        CmdNodeWriteFactory<M, R, W, F, LEN, CMD>,
     >,
+    write_factory: CmdNodeWriteFactory<M, R, W, F, LEN, CMD>,
     runtime_tunnels: Arc<TunnelRuntimeRegistry>,
     cmd_handler_map: Arc<CmdHandlerMap<LEN, CMD>>,
 }
@@ -405,21 +386,19 @@ impl<
         + Eq
         + Hash
         + Debug,
-    LISTENER: CmdTunnelListener<M, R, W>,
-> DefaultCmdNode<M, R, W, F, LEN, CMD, LISTENER>
+> DefaultCmdNodeService<M, R, W, F, LEN, CMD>
 {
     fn tunnel_not_found(tunnel_id: TunnelId) -> sfo_result::Error<CmdErrorCode> {
         crate::errors::cmd_err!(CmdErrorCode::Failed, "tunnel {:?} not found", tunnel_id)
     }
 
-    pub fn new(listener: LISTENER, factory: F, tunnel_count: u16) -> Arc<Self> {
+    pub fn new(factory: F, tunnel_count: u16) -> Arc<Self> {
         let cmd_handler_map = Arc::new(CmdHandlerMap::new());
         let handler_map = cmd_handler_map.clone();
         let resp_waiter = Arc::new(RespWaiter::new());
         let waiter = resp_waiter.clone();
-        let write_factory = CmdNodeWriteFactory::<M, R, W, _, LEN, CMD, LISTENER>::new(
+        let write_factory = CmdNodeWriteFactory::<M, R, W, _, LEN, CMD>::new(
             factory,
-            listener,
             move |local_id: PeerId,
                   peer_id: PeerId,
                   tunnel_id: TunnelId,
@@ -446,12 +425,16 @@ impl<
             },
             resp_waiter.clone(),
         );
-        write_factory.start();
         Arc::new(Self {
-            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, write_factory),
+            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, write_factory.clone()),
+            write_factory,
             runtime_tunnels: TunnelRuntimeRegistry::new(),
             cmd_handler_map,
         })
+    }
+
+    pub async fn serve_tunnel(&self, tunnel: Splittable<R, W>) -> CmdResult<()> {
+        self.write_factory.serve_tunnel(tunnel).await
     }
 
     fn tracked_send_guard(
@@ -459,9 +442,9 @@ impl<
         worker_guard: ClassifiedWorkerGuard<
             (PeerId, Option<TunnelId>),
             CommonCmdSend<M, R, W, LEN, CMD>,
-            CmdNodeWriteFactory<M, R, W, F, LEN, CMD, LISTENER>,
+            CmdNodeWriteFactory<M, R, W, F, LEN, CMD>,
         >,
-    ) -> CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER> {
+    ) -> CmdNodeSendGuard<M, R, W, F, LEN, CMD> {
         let tunnel_id = worker_guard.get_tunnel_id();
         TrackedSendGuard::new(worker_guard, self.runtime_tunnels.clone(), tunnel_id)
     }
@@ -476,10 +459,7 @@ impl<
         }
     }
 
-    async fn get_send(
-        &self,
-        peer_id: PeerId,
-    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER>> {
+    async fn get_send(&self, peer_id: PeerId) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD>> {
         loop {
             let worker_guard = self
                 .tunnel_pool
@@ -499,7 +479,7 @@ impl<
         &self,
         peer_id: PeerId,
         tunnel_id: TunnelId,
-    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER>> {
+    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD>> {
         self.reserve_tunnel(tunnel_id).await?;
         match self
             .tunnel_pool
@@ -515,11 +495,11 @@ impl<
     }
 }
 
-pub type CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER> = TrackedSendGuard<
+pub type CmdNodeSendGuard<M, R, W, F, LEN, CMD> = TrackedSendGuard<
     (PeerId, Option<TunnelId>),
     M,
     CommonCmdSend<M, R, W, LEN, CMD>,
-    CmdNodeWriteFactory<M, R, W, F, LEN, CMD, LISTENER>,
+    CmdNodeWriteFactory<M, R, W, F, LEN, CMD>,
 >;
 #[async_trait::async_trait]
 impl<
@@ -546,15 +526,8 @@ impl<
         + Eq
         + Hash
         + Debug,
-    LISTENER: CmdTunnelListener<M, R, W>,
->
-    CmdNode<
-        LEN,
-        CMD,
-        M,
-        CommonCmdSend<M, R, W, LEN, CMD>,
-        CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER>,
-    > for DefaultCmdNode<M, R, W, F, LEN, CMD, LISTENER>
+> CmdNode<LEN, CMD, M, CommonCmdSend<M, R, W, LEN, CMD>, CmdNodeSendGuard<M, R, W, F, LEN, CMD>>
+    for DefaultCmdNodeService<M, R, W, F, LEN, CMD>
 {
     fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
         self.cmd_handler_map.insert(cmd, handler);
@@ -719,7 +692,395 @@ impl<
         &self,
         peer_id: &PeerId,
         tunnel_id: TunnelId,
-    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD, LISTENER>> {
+    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD>> {
         self.get_send_of_tunnel_id(peer_id.clone(), tunnel_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + Eq
+        + Hash
+        + Debug,
+> CmdTunnelService<M, R, W> for DefaultCmdNodeService<M, R, W, F, LEN, CMD>
+{
+    async fn handle_tunnel(&self, tunnel: Splittable<R, W>) -> CmdResult<()> {
+        self.serve_tunnel(tunnel).await
+    }
+}
+
+pub struct DefaultCmdNodeIncoming<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    LISTENER,
+> {
+    tunnel_listener: LISTENER,
+    tunnel_service: Arc<dyn CmdTunnelService<M, R, W>>,
+    _p: PhantomData<fn() -> (M, R, W)>,
+}
+
+impl<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    LISTENER: CmdTunnelListener<M, R, W>,
+> DefaultCmdNodeIncoming<M, R, W, LISTENER>
+{
+    pub fn new(
+        tunnel_listener: LISTENER,
+        tunnel_service: Arc<dyn CmdTunnelService<M, R, W>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tunnel_listener,
+            tunnel_service,
+            _p: PhantomData,
+        })
+    }
+
+    pub fn start(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = this.run().await {
+                log::error!("cmd node error: {:?}", e);
+            }
+        });
+    }
+
+    pub async fn run(&self) -> CmdResult<()> {
+        loop {
+            let tunnel = self.tunnel_listener.accept().await?;
+            let tunnel_service = self.tunnel_service.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tunnel_service.handle_tunnel(tunnel).await {
+                    log::error!("peer connection error: {:?}", e);
+                }
+            });
+        }
+    }
+}
+
+pub struct DefaultCmdNode<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + Eq
+        + Hash
+        + Debug,
+    LISTENER,
+> {
+    incoming: Arc<DefaultCmdNodeIncoming<M, R, W, LISTENER>>,
+    service: Arc<DefaultCmdNodeService<M, R, W, F, LEN, CMD>>,
+}
+
+impl<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + Eq
+        + Hash
+        + Debug,
+    LISTENER: CmdTunnelListener<M, R, W>,
+> DefaultCmdNode<M, R, W, F, LEN, CMD, LISTENER>
+{
+    pub fn new(listener: LISTENER, factory: F, tunnel_count: u16) -> Arc<Self> {
+        let service = DefaultCmdNodeService::new(factory, tunnel_count);
+        let incoming = DefaultCmdNodeIncoming::new(listener, service.clone());
+        Arc::new(Self { incoming, service })
+    }
+
+    pub fn incoming(&self) -> Arc<DefaultCmdNodeIncoming<M, R, W, LISTENER>> {
+        self.incoming.clone()
+    }
+
+    pub fn service(&self) -> Arc<DefaultCmdNodeService<M, R, W, F, LEN, CMD>> {
+        self.service.clone()
+    }
+
+    pub async fn serve_tunnel(&self, tunnel: Splittable<R, W>) -> CmdResult<()> {
+        self.service.serve_tunnel(tunnel).await
+    }
+
+    pub fn start(self: &Arc<Self>) {
+        self.incoming.start();
+    }
+}
+
+impl<M, R, W, F, LEN, CMD, LISTENER> Deref for DefaultCmdNode<M, R, W, F, LEN, CMD, LISTENER>
+where
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + Eq
+        + Hash
+        + Debug,
+{
+    type Target = DefaultCmdNodeService<M, R, W, F, LEN, CMD>;
+
+    fn deref(&self) -> &Self::Target {
+        self.service.as_ref()
+    }
+}
+
+#[async_trait::async_trait]
+impl<
+    M: CmdTunnelMeta,
+    R: CmdTunnelRead<M>,
+    W: CmdTunnelWrite<M>,
+    F: CmdNodeTunnelFactory<M, R, W>,
+    LEN: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + FromPrimitive
+        + ToPrimitive,
+    CMD: RawEncode
+        + for<'a> RawDecode<'a>
+        + Copy
+        + RawFixedBytes
+        + Sync
+        + Send
+        + 'static
+        + Eq
+        + Hash
+        + Debug,
+    LISTENER: CmdTunnelListener<M, R, W>,
+> CmdNode<LEN, CMD, M, CommonCmdSend<M, R, W, LEN, CMD>, CmdNodeSendGuard<M, R, W, F, LEN, CMD>>
+    for DefaultCmdNode<M, R, W, F, LEN, CMD, LISTENER>
+{
+    fn register_cmd_handler(&self, cmd: CMD, handler: impl CmdHandler<LEN, CMD>) {
+        self.service.register_cmd_handler(cmd, handler);
+    }
+
+    async fn send(&self, peer_id: &PeerId, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()> {
+        self.service.send(peer_id, cmd, version, body).await
+    }
+
+    async fn send_with_resp(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[u8],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_with_resp(peer_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn send_parts(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.service.send_parts(peer_id, cmd, version, body).await
+    }
+
+    async fn send_parts_with_resp(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_parts_with_resp(peer_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn send_cmd(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: CmdBody,
+    ) -> CmdResult<()> {
+        self.service.send_cmd(peer_id, cmd, version, body).await
+    }
+
+    async fn send_cmd_with_resp(
+        &self,
+        peer_id: &PeerId,
+        cmd: CMD,
+        version: u8,
+        body: CmdBody,
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_cmd_with_resp(peer_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn send_by_specify_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[u8],
+    ) -> CmdResult<()> {
+        self.service
+            .send_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .await
+    }
+
+    async fn send_by_specify_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[u8],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn send_parts_by_specify_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+    ) -> CmdResult<()> {
+        self.service
+            .send_parts_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .await
+    }
+
+    async fn send_parts_by_specify_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: &[&[u8]],
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_parts_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn send_cmd_by_specify_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: CmdBody,
+    ) -> CmdResult<()> {
+        self.service
+            .send_cmd_by_specify_tunnel(peer_id, tunnel_id, cmd, version, body)
+            .await
+    }
+
+    async fn send_cmd_by_specify_tunnel_with_resp(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+        cmd: CMD,
+        version: u8,
+        body: CmdBody,
+        timeout: Duration,
+    ) -> CmdResult<CmdBody> {
+        self.service
+            .send_cmd_by_specify_tunnel_with_resp(peer_id, tunnel_id, cmd, version, body, timeout)
+            .await
+    }
+
+    async fn clear_all_tunnel(&self) {
+        self.service.clear_all_tunnel().await;
+    }
+
+    async fn get_send(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+    ) -> CmdResult<CmdNodeSendGuard<M, R, W, F, LEN, CMD>> {
+        self.service
+            .get_send_of_tunnel_id(peer_id.clone(), tunnel_id)
+            .await
     }
 }

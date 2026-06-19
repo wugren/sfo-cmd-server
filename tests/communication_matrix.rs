@@ -388,6 +388,25 @@ async fn wire_normal_connection(
     client_tx.send(client_tunnel).await.unwrap();
 }
 
+async fn wire_node_to_node_connection(
+    listener_tx: &mpsc::Sender<NormalTunnel>,
+    factory_tx: &mpsc::Sender<NormalTunnel>,
+    dialer_id: PeerId,
+    listener_id: PeerId,
+) {
+    wire_normal_connection(listener_tx, factory_tx, dialer_id, listener_id).await;
+}
+
+async fn wire_classified_node_to_node_connection(
+    listener_tx: &mpsc::Sender<ClassifiedTunnel>,
+    factory_tx: &mpsc::Sender<ClassifiedTunnel>,
+    class: TestClass,
+    dialer_id: PeerId,
+    listener_id: PeerId,
+) {
+    wire_classified_connection(listener_tx, factory_tx, class, dialer_id, listener_id).await;
+}
+
 async fn attach_normal_server_tunnel<LEN>(
     server: &std::sync::Arc<DefaultCmdServerService<(), MockRead, MockWrite, LEN, u8>>,
     client_id: PeerId,
@@ -927,6 +946,386 @@ async fn default_node_server_bidirectional_request_response() {
         .await
         .unwrap();
     assert_eq!(resp.into_string().await.unwrap(), "node-reply");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_nodes_form_mesh_and_communicate_bidirectionally() {
+    let node_a_id = peer(111);
+    let node_b_id = peer(112);
+    let node_c_id = peer(113);
+
+    let (node_a_listener, node_a_listener_tx) = NormalEndpoint::new();
+    let (node_a_factory, node_a_factory_tx) = NormalEndpoint::new();
+    let (node_b_listener, node_b_listener_tx) = NormalEndpoint::new();
+    let (node_b_factory, node_b_factory_tx) = NormalEndpoint::new();
+    let (node_c_listener, node_c_listener_tx) = NormalEndpoint::new();
+    let (node_c_factory, node_c_factory_tx) = NormalEndpoint::new();
+
+    let node_a = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+        node_a_listener,
+        node_a_factory,
+        8,
+    );
+    let node_b = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+        node_b_listener,
+        node_b_factory,
+        8,
+    );
+    let node_c = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+        node_c_listener,
+        node_c_factory,
+        8,
+    );
+
+    for (node, name) in [
+        (node_a.clone(), "node-a"),
+        (node_b.clone(), "node-b"),
+        (node_c.clone(), "node-c"),
+    ] {
+        node.register_cmd_handler(
+            0xA1,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
+                  tunnel_id: TunnelId,
+                  _header: CmdHeader<u16, u8>,
+                  body: CmdBody| {
+                async move {
+                    let body = body.into_string().await?;
+                    Ok(Some(CmdBody::from_string(format!(
+                        "{name}:{body}:{}:{}:{:?}",
+                        local_id.to_base36(),
+                        peer_id.to_base36(),
+                        tunnel_id
+                    ))))
+                }
+            },
+        );
+    }
+
+    node_a.start();
+    node_b.start();
+    node_c.start();
+
+    wire_node_to_node_connection(
+        &node_b_listener_tx,
+        &node_a_factory_tx,
+        node_a_id.clone(),
+        node_b_id.clone(),
+    )
+    .await;
+    wire_node_to_node_connection(
+        &node_c_listener_tx,
+        &node_b_factory_tx,
+        node_b_id.clone(),
+        node_c_id.clone(),
+    )
+    .await;
+    wire_node_to_node_connection(
+        &node_a_listener_tx,
+        &node_c_factory_tx,
+        node_c_id.clone(),
+        node_a_id.clone(),
+    )
+    .await;
+
+    let resp = node_a
+        .send_with_resp(&node_b_id, 0xA1, 1, b"a-to-b", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-b:a-to-b:"));
+    assert!(resp.contains(&node_b_id.to_base36()));
+    assert!(resp.contains(&node_a_id.to_base36()));
+
+    let resp = node_b
+        .send_with_resp(&node_a_id, 0xA1, 1, b"b-to-a", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-a:b-to-a:"));
+    assert!(resp.contains(&node_a_id.to_base36()));
+    assert!(resp.contains(&node_b_id.to_base36()));
+
+    let resp = node_b
+        .send_cmd_with_resp(
+            &node_c_id,
+            0xA1,
+            1,
+            CmdBody::from_string("b-to-c".to_owned()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-c:b-to-c:"));
+    assert!(resp.contains(&node_c_id.to_base36()));
+    assert!(resp.contains(&node_b_id.to_base36()));
+
+    let resp = node_c
+        .send_with_resp(&node_b_id, 0xA1, 1, b"c-to-b", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-b:c-to-b:"));
+    assert!(resp.contains(&node_b_id.to_base36()));
+    assert!(resp.contains(&node_c_id.to_base36()));
+
+    let resp = node_c
+        .send_with_resp(&node_a_id, 0xA1, 1, b"c-to-a", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-a:c-to-a:"));
+    assert!(resp.contains(&node_a_id.to_base36()));
+    assert!(resp.contains(&node_c_id.to_base36()));
+
+    let resp = node_a
+        .send_with_resp(&node_c_id, 0xA1, 1, b"a-to-c", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("node-c:a-to-c:"));
+    assert!(resp.contains(&node_c_id.to_base36()));
+    assert!(resp.contains(&node_a_id.to_base36()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classified_nodes_form_mesh_and_communicate_bidirectionally() {
+    let node_a_id = peer(121);
+    let node_b_id = peer(122);
+    let node_c_id = peer(123);
+
+    let (node_a_listener, node_a_listener_tx) = ClassifiedEndpoint::new();
+    let (node_a_factory, node_a_factory_tx) = ClassifiedEndpoint::new();
+    let (node_b_listener, node_b_listener_tx) = ClassifiedEndpoint::new();
+    let (node_b_factory, node_b_factory_tx) = ClassifiedEndpoint::new();
+    let (node_c_listener, node_c_listener_tx) = ClassifiedEndpoint::new();
+    let (node_c_factory, node_c_factory_tx) = ClassifiedEndpoint::new();
+
+    let node_a = DefaultClassifiedCmdNode::<
+        TestClass,
+        (),
+        MockClassifiedRead,
+        MockClassifiedWrite,
+        _,
+        u16,
+        u8,
+        _,
+    >::new(node_a_listener, node_a_factory, 8);
+    let node_b = DefaultClassifiedCmdNode::<
+        TestClass,
+        (),
+        MockClassifiedRead,
+        MockClassifiedWrite,
+        _,
+        u16,
+        u8,
+        _,
+    >::new(node_b_listener, node_b_factory, 8);
+    let node_c = DefaultClassifiedCmdNode::<
+        TestClass,
+        (),
+        MockClassifiedRead,
+        MockClassifiedWrite,
+        _,
+        u16,
+        u8,
+        _,
+    >::new(node_c_listener, node_c_factory, 8);
+
+    for (node, name) in [
+        (node_a.clone(), "classified-a"),
+        (node_b.clone(), "classified-b"),
+        (node_c.clone(), "classified-c"),
+    ] {
+        node.register_cmd_handler(
+            0xB1,
+            move |local_id: PeerId,
+                  peer_id: PeerId,
+                  tunnel_id: TunnelId,
+                  _header: CmdHeader<u16, u8>,
+                  body: CmdBody| {
+                async move {
+                    let body = body.into_string().await?;
+                    Ok(Some(CmdBody::from_string(format!(
+                        "{name}:{body}:{}:{}:{:?}",
+                        local_id.to_base36(),
+                        peer_id.to_base36(),
+                        tunnel_id
+                    ))))
+                }
+            },
+        );
+    }
+
+    node_a.start();
+    node_b.start();
+    node_c.start();
+
+    wire_classified_node_to_node_connection(
+        &node_b_listener_tx,
+        &node_a_factory_tx,
+        TestClass::Alpha,
+        node_a_id.clone(),
+        node_b_id.clone(),
+    )
+    .await;
+    wire_classified_node_to_node_connection(
+        &node_c_listener_tx,
+        &node_b_factory_tx,
+        TestClass::Beta,
+        node_b_id.clone(),
+        node_c_id.clone(),
+    )
+    .await;
+    wire_classified_node_to_node_connection(
+        &node_a_listener_tx,
+        &node_c_factory_tx,
+        TestClass::Alpha,
+        node_c_id.clone(),
+        node_a_id.clone(),
+    )
+    .await;
+
+    let resp = node_a
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_b_id,
+            TestClass::Alpha,
+            0xB1,
+            1,
+            b"a-to-b",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-b:a-to-b:"));
+    assert!(resp.contains(&node_b_id.to_base36()));
+    assert!(resp.contains(&node_a_id.to_base36()));
+
+    let resp = node_b
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_a_id,
+            TestClass::Alpha,
+            0xB1,
+            1,
+            b"b-to-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-a:b-to-a:"));
+    assert!(resp.contains(&node_a_id.to_base36()));
+    assert!(resp.contains(&node_b_id.to_base36()));
+
+    let resp = node_b
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_c_id,
+            TestClass::Beta,
+            0xB1,
+            1,
+            b"b-to-c",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-c:b-to-c:"));
+    assert!(resp.contains(&node_c_id.to_base36()));
+    assert!(resp.contains(&node_b_id.to_base36()));
+
+    let resp = node_c
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_b_id,
+            TestClass::Beta,
+            0xB1,
+            1,
+            b"c-to-b",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-b:c-to-b:"));
+    assert!(resp.contains(&node_b_id.to_base36()));
+    assert!(resp.contains(&node_c_id.to_base36()));
+
+    let resp = node_c
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_a_id,
+            TestClass::Alpha,
+            0xB1,
+            1,
+            b"c-to-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-a:c-to-a:"));
+    assert!(resp.contains(&node_a_id.to_base36()));
+    assert!(resp.contains(&node_c_id.to_base36()));
+
+    let resp = node_a
+        .send_by_peer_classified_tunnel_with_resp(
+            &node_c_id,
+            TestClass::Alpha,
+            0xB1,
+            1,
+            b"a-to-c",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-c:a-to-c:"));
+    assert!(resp.contains(&node_c_id.to_base36()));
+    assert!(resp.contains(&node_a_id.to_base36()));
+
+    let tunnel_id = node_a
+        .find_tunnel_id_by_peer_classified(&node_b_id, TestClass::Alpha)
+        .await
+        .unwrap();
+    let resp = node_a
+        .send_cmd_by_specify_tunnel_with_resp(
+            &node_b_id,
+            tunnel_id,
+            0xB1,
+            1,
+            CmdBody::from_string("a-to-b-specific".to_owned()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .into_string()
+        .await
+        .unwrap();
+    assert!(resp.starts_with("classified-b:a-to-b-specific:"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
