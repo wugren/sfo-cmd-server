@@ -413,12 +413,8 @@ pub(crate) fn create_recv_handle<
                     header.pkg_len().to_u64().unwrap()
                 );
                 let body_len = header.pkg_len().to_u64().unwrap();
-                let cmd_read =
+                let (cmd_read, completion) =
                     CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
-                let waiter = cmd_read.get_waiter();
-                let future = waiter
-                    .create_result_future()
-                    .map_err(into_cmd_err!(CmdErrorCode::Failed))?;
                 {
                     let version = header.version();
                     let seq = header.seq();
@@ -474,9 +470,7 @@ pub(crate) fn create_recv_handle<
                         _ => {}
                     }
                 };
-                reader = future
-                    .await
-                    .map_err(into_cmd_err!(CmdErrorCode::Failed))??;
+                reader = completion.into_reader().await?;
                 // }
             }
             Ok(())

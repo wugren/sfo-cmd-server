@@ -2,7 +2,6 @@ use crate::TunnelId;
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::peer_id::PeerId;
 use bucky_raw_codec::{RawDecode, RawEncode};
-use callback_result::SingleCallbackWaiter;
 use futures_lite::ready;
 use num::{FromPrimitive, ToPrimitive};
 use sfo_split::RHalf;
@@ -15,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::{fmt, io};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::sync::oneshot;
 
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
@@ -77,23 +77,46 @@ pub(crate) struct CmdBodyRead<
     recv: Option<RHalf<R, W>>,
     len: usize,
     offset: usize,
-    waiter: Arc<SingleCallbackWaiter<CmdResult<RHalf<R, W>>>>,
+    completion: Option<oneshot::Sender<CmdResult<RHalf<R, W>>>>,
+}
+
+pub(crate) struct CmdBodyReadCompletion<
+    R: AsyncRead + Send + 'static + Unpin,
+    W: AsyncWrite + Send + 'static + Unpin,
+> {
+    receiver: oneshot::Receiver<CmdResult<RHalf<R, W>>>,
+}
+
+impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin>
+    CmdBodyReadCompletion<R, W>
+{
+    pub async fn into_reader(self) -> CmdResult<RHalf<R, W>> {
+        self.receiver
+            .await
+            .map_err(|e| cmd_err!(CmdErrorCode::Failed, "body read completion canceled: {}", e))?
+    }
 }
 
 impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unpin>
     CmdBodyRead<R, W>
 {
-    pub fn new(recv: RHalf<R, W>, len: usize) -> Self {
-        Self {
-            recv: Some(recv),
-            len,
-            offset: 0,
-            waiter: Arc::new(SingleCallbackWaiter::new()),
-        }
+    pub fn new(recv: RHalf<R, W>, len: usize) -> (Self, CmdBodyReadCompletion<R, W>) {
+        let (completion, receiver) = oneshot::channel();
+        (
+            Self {
+                recv: Some(recv),
+                len,
+                offset: 0,
+                completion: Some(completion),
+            },
+            CmdBodyReadCompletion { receiver },
+        )
     }
 
-    pub(crate) fn get_waiter(&self) -> Arc<SingleCallbackWaiter<CmdResult<RHalf<R, W>>>> {
-        self.waiter.clone()
+    fn complete(&mut self, result: CmdResult<RHalf<R, W>>) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(result);
+        }
     }
 }
 
@@ -115,13 +138,12 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
             .map_err(into_cmd_err!(CmdErrorCode::IoError));
         if ret.is_ok() {
             self.offset = self.len;
-            self.waiter
-                .set_result_with_cache(Ok(self.recv.take().unwrap()));
+            let recv = self.recv.take().unwrap();
+            self.complete(Ok(recv));
             Ok(buf)
         } else {
             self.recv.take();
-            self.waiter
-                .set_result_with_cache(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
+            self.complete(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
             Err(ret.err().unwrap())
         }
     }
@@ -136,22 +158,26 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
         }
         let mut recv = self.recv.take().unwrap();
         let len = self.len - self.offset;
-        let waiter = self.waiter.clone();
+        let completion = self.completion.take();
         if len == 0 {
-            waiter.set_result_with_cache(Ok(recv));
+            if let Some(completion) = completion {
+                let _ = completion.send(Ok(recv));
+            }
             return;
         }
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; len];
-            if let Err(e) = recv.read_exact(&mut buf).await {
-                waiter.set_result_with_cache(Err(cmd_err!(
-                    CmdErrorCode::IoError,
-                    "read body error {}",
-                    e
-                )));
-            } else {
-                waiter.set_result_with_cache(Ok(recv));
+            if let Some(completion) = completion {
+                if let Err(e) = recv.read_exact(&mut buf).await {
+                    let _ = completion.send(Err(cmd_err!(
+                        CmdErrorCode::IoError,
+                        "read body error {}",
+                        e
+                    )));
+                } else {
+                    let _ = completion.send(Ok(recv));
+                }
             }
         });
     }
@@ -181,15 +207,14 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
                 this.offset += len;
                 buf.advance(len);
                 if this.offset == this.len {
-                    this.waiter
-                        .set_result_with_cache(Ok(this.recv.take().unwrap()));
+                    let recv = this.recv.take().unwrap();
+                    this.complete(Ok(recv));
                 }
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
                 this.recv.take();
-                this.waiter
-                    .set_result_with_cache(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
+                this.complete(Err(cmd_err!(CmdErrorCode::IoError, "read body error")));
                 Poll::Ready(Err(e))
             }
             Poll::Pending => Poll::Pending,
@@ -561,7 +586,7 @@ mod tests {
 
         let tunnel = CmdTunnel::new(TestRead { read: a_read }, TestWrite { write: a_write });
         let (reader, _writer) = tunnel.split();
-        let mut body_read = CmdBodyRead::new(reader, 6);
+        let (mut body_read, _completion) = CmdBodyRead::new(reader, 6);
 
         let first = body_read.read_all().await.unwrap();
         assert_eq!(first, b"abcdef");
@@ -579,7 +604,7 @@ mod tests {
 
         let tunnel = CmdTunnel::new(TestRead { read: a_read }, TestWrite { write: a_write });
         let (reader, _writer) = tunnel.split();
-        let mut body_read = CmdBodyRead::new(reader, 5);
+        let (mut body_read, _completion) = CmdBodyRead::new(reader, 5);
         assert!(body_read.read_all().await.is_err());
     }
 }

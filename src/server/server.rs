@@ -177,13 +177,16 @@ impl<
                     }
                     let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    sfo_log::debug!("recv cmd {:?}", header.cmd_code());
                     let body_len = header.pkg_len().to_u64().unwrap();
-                    let cmd_read = CmdBodyRead::new(reader, body_len as usize);
-                    let waiter = cmd_read.get_waiter();
-                    let future = waiter
-                        .create_result_future()
-                        .map_err(into_cmd_err!(CmdErrorCode::Failed))?;
+                    sfo_log::debug!(
+                        "tunnel {:?} recv cmd {:?} from {} to {} len {}",
+                        tunnel_id,
+                        header.cmd_code(),
+                        remote_id.to_base36(),
+                        local_id.to_base36(),
+                        body_len
+                    );
+                    let (cmd_read, completion) = CmdBodyRead::new(reader, body_len as usize);
                     {
                         let body = CmdBody::from_reader(BufReader::new(cmd_read), body_len);
                         if header.is_resp() && header.seq().is_some() {
@@ -247,9 +250,7 @@ impl<
                             }
                         }
                     }
-                    reader = future
-                        .await
-                        .map_err(into_cmd_err!(CmdErrorCode::Failed))??;
+                    reader = completion.into_reader().await?;
                 }
                 Ok(())
             }

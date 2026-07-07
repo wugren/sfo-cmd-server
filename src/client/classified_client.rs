@@ -724,12 +724,8 @@ impl<
                         tunnel_id
                     );
                     let body_len = header.pkg_len().to_u64().unwrap();
-                    let cmd_read =
+                    let (cmd_read, completion) =
                         CmdBodyRead::new(recv, header.pkg_len().to_u64().unwrap() as usize);
-                    let waiter = cmd_read.get_waiter();
-                    let future = waiter
-                        .create_result_future()
-                        .map_err(into_cmd_err!(CmdErrorCode::Failed))?;
                     let version = header.version();
                     let seq = header.seq();
                     let cmd_code = header.cmd_code();
@@ -782,9 +778,7 @@ impl<
                         }
                         _ => {}
                     }
-                    recv = future
-                        .await
-                        .map_err(into_cmd_err!(CmdErrorCode::Failed))??;
+                    recv = completion.into_reader().await?;
                     log::debug!(
                         "handle cmd {:?} from {} len {} tunnel {:?} complete",
                         cmd_code,
