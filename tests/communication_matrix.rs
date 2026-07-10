@@ -2593,6 +2593,25 @@ async fn server_send_variants_fail_without_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_specified_tunnel_is_scoped_by_peer_id() {
+    let connected_peer = peer(111);
+    let wrong_peer = peer(112);
+    let server_id = peer(113);
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u16, u8>::new();
+    let _probe = attach_normal_server_tunnel(&server, connected_peer.clone(), server_id).await;
+    let tunnel_id = server.get_peer_tunnels(&connected_peer).await[0].conn_id;
+
+    let err = server
+        .send_by_specify_tunnel(&wrong_peer, tunnel_id, 0x40, 1, b"wrong-peer")
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), CmdErrorCode::PeerConnectionNotFound);
+    assert_eq!(server.get_peer_tunnels(&connected_peer).await.len(), 1);
+    assert!(server.get_peer_tunnels(&wrong_peer).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_send_failover_uses_next_tunnel_after_write_error() {
     let client_id = peer(101);
     let server_id = peer(102);

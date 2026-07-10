@@ -1,7 +1,10 @@
 use super::CmdServer;
 use super::peer_manager::{PeerManager, PeerManagerRef};
 use crate::client::{RespWaiter, RespWaiterRef, gen_resp_id, gen_seq};
-use crate::cmd::{CmdBodyRead, CmdHandler, CmdHandlerMap, CmdHeader};
+use crate::cmd::{
+    CmdBodyRead, CmdHandler, CmdHandlerMap, CmdHeader, copy_cmd_body, decode_pkg_len,
+    encode_pkg_len,
+};
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::peer_connection::PeerConnection;
 use crate::peer_id::PeerId;
@@ -119,14 +122,7 @@ impl<
 > DefaultCmdServerService<M, R, W, LEN, CMD>
 {
     fn encode_pkg_len(len: u64) -> CmdResult<LEN> {
-        LEN::from_u64(len).ok_or_else(|| {
-            cmd_err!(
-                CmdErrorCode::InvalidParam,
-                "body len {} exceeds header len type {}",
-                len,
-                std::any::type_name::<LEN>()
-            )
-        })
+        encode_pkg_len::<LEN>(len)
     }
 
     pub fn new() -> Arc<Self> {
@@ -177,7 +173,7 @@ impl<
                     }
                     let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                    let body_len = header.pkg_len().to_u64().unwrap();
+                    let (body_len, body_len_usize) = decode_pkg_len(header.pkg_len())?;
                     sfo_log::debug!(
                         "tunnel {:?} recv cmd {:?} from {} to {} len {}",
                         tunnel_id,
@@ -186,12 +182,16 @@ impl<
                         local_id.to_base36(),
                         body_len
                     );
-                    let (cmd_read, completion) = CmdBodyRead::new(reader, body_len as usize);
+                    let (cmd_read, completion) = CmdBodyRead::new(reader, body_len_usize);
                     {
                         let body = CmdBody::from_reader(BufReader::new(cmd_read), body_len);
                         if header.is_resp() && header.seq().is_some() {
-                            let resp_id =
-                                gen_resp_id(tunnel_id, header.cmd_code(), header.seq().unwrap());
+                            let resp_id = gen_resp_id(
+                                &remote_id,
+                                tunnel_id,
+                                header.cmd_code(),
+                                header.seq().unwrap(),
+                            );
                             let _ = resp_waiter.set_result(resp_id, body);
                         } else if let Some(handler) = cmd_handler_map.get(header.cmd_code()) {
                             let version = header.version();
@@ -235,9 +235,7 @@ impl<
                                         .write_all(buf.as_slice())
                                         .await
                                         .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                                    tokio::io::copy(&mut body, write.deref_mut().deref_mut())
-                                        .await
-                                        .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                                    copy_cmd_body(&mut body, write.deref_mut().deref_mut()).await?;
                                     write
                                         .flush()
                                         .await
@@ -346,12 +344,11 @@ impl<
         for conn in connections {
             let ret: CmdResult<()> = async move {
                 log::debug!(
-                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}",
+                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}",
                     peer_id,
                     conn.conn_id,
                     cmd,
-                    body.len(),
-                    hex::encode(body)
+                    body.len()
                 );
                 let header = CmdHeader::<LEN, CMD>::new(
                     version,
@@ -408,12 +405,11 @@ impl<
             }
             let ret: CmdResult<CmdBody> = async move {
                 log::debug!(
-                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}",
+                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}",
                     peer_id,
                     conn.conn_id,
                     cmd,
-                    body.len(),
-                    hex::encode(body)
+                    body.len()
                 );
                 let seq = gen_seq();
                 let header = CmdHeader::<LEN, CMD>::new(
@@ -426,7 +422,7 @@ impl<
                 let buf = header
                     .to_vec()
                     .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+                let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
                 let waiter = self
                     .resp_waiter
                     .create_timeout_result_future(resp_id, timeout)
@@ -490,13 +486,6 @@ impl<
                 let mut len = 0;
                 for b in body.iter() {
                     len += b.len();
-                    log::debug!(
-                        "send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}",
-                        peer_id,
-                        conn.conn_id,
-                        cmd,
-                        hex::encode(b)
-                    );
                 }
                 log::debug!(
                     "send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}",
@@ -564,13 +553,6 @@ impl<
                 let mut len = 0;
                 for b in body.iter() {
                     len += b.len();
-                    log::debug!(
-                        "send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}",
-                        peer_id,
-                        conn.conn_id,
-                        cmd,
-                        hex::encode(b)
-                    );
                 }
                 log::debug!(
                     "send2 peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}",
@@ -590,7 +572,7 @@ impl<
                 let buf = header
                     .to_vec()
                     .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+                let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
                 let waiter = self
                     .resp_waiter
                     .create_timeout_result_future(resp_id, timeout)
@@ -649,12 +631,11 @@ impl<
         for conn in connections {
             let ret: CmdResult<()> = async {
                 log::debug!(
-                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {} data: {}",
+                    "send peer_id: {}, tunnel_id {:?}, cmd: {:?}, len: {}",
                     peer_id,
                     conn.conn_id,
                     cmd,
-                    body.len(),
-                    "<streaming>"
+                    body.len()
                 );
                 let header = CmdHeader::<LEN, CMD>::new(
                     version,
@@ -676,9 +657,7 @@ impl<
                 send.write_all(buf.as_slice())
                     .await
                     .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                tokio::io::copy(&mut body, send.deref_mut().deref_mut())
-                    .await
-                    .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                copy_cmd_body(&mut body, send.deref_mut().deref_mut()).await?;
                 send.flush()
                     .await
                     .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -736,7 +715,7 @@ impl<
                 let buf = header
                     .to_vec()
                     .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-                let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+                let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
                 let waiter = self
                     .resp_waiter
                     .create_timeout_result_future(resp_id, timeout)
@@ -752,9 +731,7 @@ impl<
                     send.write_all(buf.as_slice())
                         .await
                         .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                    tokio::io::copy(&mut body, send.deref_mut().deref_mut())
-                        .await
-                        .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                    copy_cmd_body(&mut body, send.deref_mut().deref_mut()).await?;
                     send.flush()
                         .await
                         .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -780,7 +757,7 @@ impl<
         version: u8,
         body: &[u8],
     ) -> CmdResult<()> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -791,12 +768,11 @@ impl<
         let conn = conn.unwrap();
         assert_eq!(tunnel_id, conn.conn_id);
         log::trace!(
-            "send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {} data: {}",
+            "send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}",
             peer_id,
             conn.conn_id,
             cmd,
-            body.len(),
-            hex::encode(body)
+            body.len()
         );
         let header = CmdHeader::<LEN, CMD>::new(
             version,
@@ -836,7 +812,7 @@ impl<
         body: &[u8],
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -856,12 +832,11 @@ impl<
         }
         assert_eq!(tunnel_id, conn.conn_id);
         log::trace!(
-            "send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {} data: {}",
+            "send_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?}, len: {}",
             peer_id,
             conn.conn_id,
             cmd,
-            body.len(),
-            hex::encode(body)
+            body.len()
         );
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(
@@ -874,7 +849,7 @@ impl<
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+        let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
         let waiter = self
             .resp_waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -909,7 +884,7 @@ impl<
         version: u8,
         body: &[&[u8]],
     ) -> CmdResult<()> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -922,13 +897,6 @@ impl<
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::debug!(
-                "send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}",
-                peer_id,
-                conn.conn_id,
-                cmd,
-                hex::encode(b)
-            );
         }
         log::debug!(
             "send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}",
@@ -977,7 +945,7 @@ impl<
         body: &[&[u8]],
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -999,13 +967,6 @@ impl<
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::debug!(
-                "send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} body: {}",
-                peer_id,
-                conn.conn_id,
-                cmd,
-                hex::encode(b)
-            );
         }
         log::debug!(
             "send2_by_specify_tunnel peer_id: {}, tunnel_id: {:?}, cmd: {:?} len: {}",
@@ -1025,7 +986,7 @@ impl<
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+        let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
         let waiter = self
             .resp_waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -1062,7 +1023,7 @@ impl<
         version: u8,
         mut body: CmdBody,
     ) -> CmdResult<()> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -1099,9 +1060,7 @@ impl<
         send.write_all(buf.as_slice())
             .await
             .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        tokio::io::copy(&mut body, send.deref_mut().deref_mut())
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        copy_cmd_body(&mut body, send.deref_mut().deref_mut()).await?;
         send.flush()
             .await
             .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
@@ -1117,7 +1076,7 @@ impl<
         mut body: CmdBody,
         timeout: Duration,
     ) -> CmdResult<CmdBody> {
-        let conn = self.peer_manager.find_connection(tunnel_id);
+        let conn = self.peer_manager.find_connection(peer_id, tunnel_id);
         if conn.is_none() {
             return Err(cmd_err!(
                 CmdErrorCode::PeerConnectionNotFound,
@@ -1154,7 +1113,7 @@ impl<
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(conn.conn_id, cmd, seq);
+        let resp_id = gen_resp_id(&conn.peer_id, conn.conn_id, cmd, seq);
         let waiter = self
             .resp_waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -1170,9 +1129,7 @@ impl<
             send.write_all(buf.as_slice())
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-            tokio::io::copy(&mut body, send.deref_mut().deref_mut())
-                .await
-                .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+            copy_cmd_body(&mut body, send.deref_mut().deref_mut()).await?;
             send.flush()
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::IoError))?;

@@ -2,7 +2,6 @@ use crate::TunnelId;
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::peer_id::PeerId;
 use bucky_raw_codec::{RawDecode, RawEncode};
-use futures_lite::ready;
 use num::{FromPrimitive, ToPrimitive};
 use sfo_split::RHalf;
 use std::collections::HashMap;
@@ -15,6 +14,51 @@ use std::task::{Context, Poll};
 use std::{fmt, io};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
+
+pub const MAX_PKG_LEN: u64 = 1024 * 1024;
+
+fn validate_pkg_len(len: u64) -> CmdResult<()> {
+    if len > MAX_PKG_LEN {
+        return Err(cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "body len {} exceeds max package len {}",
+            len,
+            MAX_PKG_LEN
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_pkg_len<LEN: FromPrimitive>(len: u64) -> CmdResult<LEN> {
+    validate_pkg_len(len)?;
+    LEN::from_u64(len).ok_or_else(|| {
+        cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "body len {} exceeds header len type {}",
+            len,
+            std::any::type_name::<LEN>()
+        )
+    })
+}
+
+pub(crate) fn decode_pkg_len<LEN: ToPrimitive>(len: LEN) -> CmdResult<(u64, usize)> {
+    let len = len.to_u64().ok_or_else(|| {
+        cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "invalid body len for header len type {}",
+            std::any::type_name::<LEN>()
+        )
+    })?;
+    validate_pkg_len(len)?;
+    let usize_len = usize::try_from(len).map_err(|_| {
+        cmd_err!(
+            CmdErrorCode::InvalidParam,
+            "body len {} exceeds platform usize",
+            len
+        )
+    })?;
+    Ok((len, usize_len))
+}
 
 #[derive(RawEncode, RawDecode)]
 pub struct CmdHeader<LEN, CMD> {
@@ -302,7 +346,7 @@ impl CmdBody {
     }
 
     pub fn into_reader(self) -> Box<dyn AsyncBufRead + Unpin + Send + 'static> {
-        self.reader
+        Box::new(self)
     }
 
     pub async fn read_all(&mut self) -> CmdResult<Vec<u8>> {
@@ -365,23 +409,27 @@ impl CmdBody {
     }
 
     pub fn len(&self) -> u64 {
-        self.length
+        self.length.saturating_sub(self.bytes_read)
     }
 
     /// Returns `true` if the body has a length of zero, and `false` otherwise.
     pub fn is_empty(&self) -> bool {
-        self.length == 0
+        self.len() == 0
     }
 
-    pub fn chain(self, other: CmdBody) -> Self {
-        let length = (self.length - self.bytes_read)
-            .checked_add(other.length - other.bytes_read)
-            .unwrap_or(0);
-        Self {
+    pub fn chain(self, other: CmdBody) -> CmdResult<Self> {
+        let length = self.len().checked_add(other.len()).ok_or_else(|| {
+            cmd_err!(
+                CmdErrorCode::InvalidParam,
+                "chained body length exceeds u64"
+            )
+        })?;
+        validate_pkg_len(length)?;
+        Ok(Self {
             length,
             reader: Box::new(tokio::io::AsyncReadExt::chain(self, other)),
             bytes_read: 0,
-        }
+        })
     }
 }
 
@@ -426,38 +474,122 @@ impl AsyncRead for CmdBody {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let buf = if self.length == self.bytes_read {
+        let remaining = self.len();
+        if remaining == 0 {
             return Poll::Ready(Ok(()));
-        } else {
-            buf
-        };
+        }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
 
-        ready!(Pin::new(&mut self.reader).poll_read(cx, buf))?;
-        self.bytes_read += buf.filled().len() as u64;
-        Poll::Ready(Ok(()))
+        let read_len = std::cmp::min(remaining, buf.remaining() as u64) as usize;
+        let mut read_buf = ReadBuf::new(buf.initialize_unfilled_to(read_len));
+        match Pin::new(&mut self.reader).poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {
+                let read = read_buf.filled().len();
+                if read == 0 {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("cmd body ended with {} bytes remaining", remaining),
+                    )));
+                }
+                self.bytes_read += read as u64;
+                buf.advance(read);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl AsyncBufRead for CmdBody {
     #[allow(rustdoc::missing_doc_code_examples)]
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&'_ [u8]>> {
-        self.project().reader.poll_fill_buf(cx)
+        let this = self.project();
+        let remaining = this.length.saturating_sub(*this.bytes_read);
+        if remaining == 0 {
+            return Poll::Ready(Ok(&[]));
+        }
+        match this.reader.poll_fill_buf(cx) {
+            Poll::Ready(Ok(buf)) => {
+                if buf.is_empty() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("cmd body ended with {} bytes remaining", remaining),
+                    )));
+                }
+                let len = std::cmp::min(remaining, buf.len() as u64) as usize;
+                Poll::Ready(Ok(&buf[..len]))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
-    fn consume(mut self: Pin<&mut Self>, amt: usize) {
-        Pin::new(&mut self.reader).consume(amt)
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        let this = self.project();
+        let remaining = this.length.saturating_sub(*this.bytes_read);
+        let consumed = std::cmp::min(remaining, amt as u64) as usize;
+        this.reader.consume(consumed);
+        *this.bytes_read += consumed as u64;
     }
+}
+
+pub(crate) async fn copy_cmd_body<W: AsyncWrite + Unpin>(
+    body: &mut CmdBody,
+    writer: &mut W,
+) -> CmdResult<()> {
+    let expected = body.len();
+    let copied = tokio::io::copy(body, writer)
+        .await
+        .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+    if copied != expected {
+        return Err(cmd_err!(
+            CmdErrorCode::IoError,
+            "cmd body length mismatch: expected {}, copied {}",
+            expected,
+            copied
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CmdBody, CmdBodyRead, CmdBodyReadAll, CmdHeader};
+    use super::{
+        CmdBody, CmdBodyRead, CmdBodyReadAll, CmdHeader, MAX_PKG_LEN, decode_pkg_len,
+        encode_pkg_len,
+    };
+    use crate::errors::CmdErrorCode;
     use crate::{CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+    use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{
         AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, split,
     };
+
+    #[test]
+    fn pkg_len_overflow_returns_invalid_param() {
+        assert_eq!(encode_pkg_len::<u8>(u8::MAX as u64).unwrap(), u8::MAX);
+        assert_eq!(
+            encode_pkg_len::<u8>(u8::MAX as u64 + 1).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+        assert_eq!(
+            encode_pkg_len::<u32>(MAX_PKG_LEN).unwrap(),
+            MAX_PKG_LEN as u32
+        );
+        assert_eq!(
+            encode_pkg_len::<u32>(MAX_PKG_LEN + 1).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+        assert_eq!(
+            decode_pkg_len((MAX_PKG_LEN + 1) as u32).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+    }
 
     struct TestRead {
         read: tokio::io::ReadHalf<DuplexStream>,
@@ -539,9 +671,46 @@ mod tests {
         first.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"a");
 
-        let chained = first.chain(CmdBody::from_bytes(b"XYZ".to_vec()));
+        let chained = first.chain(CmdBody::from_bytes(b"XYZ".to_vec())).unwrap();
         let s = chained.into_string().await.unwrap();
         assert_eq!(s, "bcXYZ");
+    }
+
+    #[test]
+    fn cmd_body_chain_rejects_package_larger_than_limit() {
+        let first = CmdBody::from_reader(io::Cursor::new(Vec::<u8>::new()), MAX_PKG_LEN);
+        let second = CmdBody::from_reader(io::Cursor::new(Vec::<u8>::new()), 1);
+
+        assert_eq!(
+            first.chain(second).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_body_limits_reader_to_declared_length() {
+        let body = CmdBody::from_reader(io::Cursor::new(b"abcdef".to_vec()), 3);
+        assert_eq!(body.into_bytes().await.unwrap(), b"abc");
+    }
+
+    #[tokio::test]
+    async fn cmd_body_rejects_reader_shorter_than_declared_length() {
+        let body = CmdBody::from_reader(io::Cursor::new(b"ab".to_vec()), 3);
+        assert_eq!(
+            body.into_bytes().await.unwrap_err().code(),
+            CmdErrorCode::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_body_len_tracks_remaining_output() {
+        let mut body = CmdBody::from_bytes(b"abcd".to_vec());
+        let mut prefix = [0u8; 1];
+        body.read_exact(&mut prefix).await.unwrap();
+
+        assert_eq!(&prefix, b"a");
+        assert_eq!(body.len(), 3);
+        assert_eq!(body.into_bytes().await.unwrap(), b"bcd");
     }
 
     #[test]

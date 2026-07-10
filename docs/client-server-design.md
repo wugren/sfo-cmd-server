@@ -26,6 +26,8 @@
 
 所有消息都按 `header_len(u8) + CmdHeader + body` 发送，其中 `header_len` 是 `CmdHeader` 编码后的字节长度，因此 header 本身必须满足 `<= 255`。
 
+`CmdHeader.pkg_len` 表示 body 长度，收发两侧统一限制为最多 1 MiB（`MAX_PKG_LEN`）。`CmdBody` 的读取和发送都严格限制在声明的剩余长度内；底层 reader 提前 EOF 会返回错误，超过声明长度的数据不会进入当前协议帧。
+
 `CmdHeader<LEN, CMD>` 包含：
 
 - `pkg_len`: body 长度
@@ -93,7 +95,7 @@
 1. 读取 `header_len`
 2. 解码 `CmdHeader`
 3. 构造限长 `CmdBody`
-4. 若是响应包，则按 `gen_resp_id(tunnel_id, cmd, seq)` 投递给 `RespWaiter`
+4. 若是响应包，则按 `gen_resp_id(peer_id, tunnel_id, cmd, seq)` 投递给 `RespWaiter`
 5. 若是普通请求，则查 `CmdHandlerMap` 执行 handler
 6. handler 返回 `Some(CmdBody)` 时，自动沿原 `cmd/seq/version` 回包
 7. 等待 body 被消费或 drain 完成，再继续读取下一帧
@@ -133,7 +135,7 @@
 - 如果目标 tunnel 正被别的 guard 持有，而池子又还没满，pool 会倾向于走 `factory.create(...)`
 - 对 `client` / `node` 的“精确 tunnel 复用”场景来说，这会把“存在但 busy”误判成 `tunnel not found`
 
-现在 `client` / `classified client` / `node` / `classified node` 都在上层维护了一份按真实 `tunnel_id` 索引的运行时表，状态只有两类：
+现在 `client` / `classified client` / `node` / `classified node` 都在上层维护了一份按真实 `(peer_id, tunnel_id)` 索引的运行时表，状态只有两类：
 
 - `Idle`
 - `Borrowed`
@@ -205,10 +207,7 @@ server 由三层组成：
 4. 封装成 `PeerConnection`
 5. 交给 `PeerManager` 纳管
 
-`PeerManager` 维护两份索引：
-
-- `TunnelId -> PeerConnection`
-- `PeerId -> Vec<TunnelId>`
+`PeerManager` 按 `TunnelId -> (PeerId, PeerConnection)` 维护全局主索引，并维护每个 peer 的 tunnel 列表。`TunnelId` 由 server 的统一生成器分配，在当前 server 实例内全局唯一。
 
 并负责在：
 
@@ -260,9 +259,9 @@ server 当前暴露三类目标范围：
   - 大 body 的资源行为和 client 侧保持一致
 
 - `send_by_specify_tunnel*`
-  - 通过 `TunnelId` 直接查 `PeerManager`
+  - 先通过全局 `TunnelId` 查 `PeerManager`，再校验连接所属 `PeerId`
   - tunnel 不存在时返回 `PeerConnectionNotFound`
-  - 当前实现不会再校验该 tunnel 是否属于传入的 `peer_id`
+  - 传入的 `peer_id` 与连接不一致时同样返回 `PeerConnectionNotFound`
 
 - `send_by_all_tunnels` / `send_parts_by_all_tunnels`
   - 对当前 `peer_id` 下的每条 tunnel 逐个尝试
@@ -274,17 +273,7 @@ server 当前暴露三类目标范围：
 
 client/server 共用 `gen_resp_id()` 生成 waiter key。
 
-当前实现不是简单截断 `CMD` 编码，而是：
-
-1. 先拿到 `CMD` 的原始编码字节
-2. 将各个 8-byte chunk 混入一个 `u64` 指纹
-3. 再与 `tunnel_id`、`seq` 拼成 `u128`
-
-逻辑上可理解为：
-
-- 高 32 bit：`tunnel_id`
-- 中间 32 bit：`seq`
-- 低 64 bit：`cmd` 编码的混合指纹
+当前实现将 `peer_id`、`tunnel_id`、`seq` 和 `CMD` 原始编码共同输入 SHA-256，并取摘要前 128 bit 作为 waiter key。这样相同的 `tunnel_id/cmd/seq` 在不同 peer 下仍会得到不同的关联键。
 
 这保证了：
 
@@ -347,26 +336,20 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 
 这个行为本身是明确的，但接口名和返回类型不会把“best-effort、不可感知部分失败”直接暴露给调用方。
 
-### 10.3 指定 tunnel 的 server 接口没有校验 `peer_id`
-
-`send_by_specify_tunnel*` / `send_cmd_by_specify_tunnel*` 当前只按 `TunnelId` 查连接，传入的 `peer_id` 主要用于日志和 API 形状对齐，不参与实际校验。
-
-如果调用方手里持有某个有效 `tunnel_id`，即使给错 `peer_id`，发送仍会命中该 tunnel。
-
-### 10.4 `tunnel_meta` 的来源在不同 client 实现间仍不一致
+### 10.3 `tunnel_meta` 的来源在不同 client 实现间仍不一致
 
 - 默认 client 在建 tunnel 时从 write half 读取 `tunnel_meta`
 - classified client 在建 tunnel 时从 read half 读取 `tunnel_meta`
 
 如果某种 tunnel 实现的 read/write half 暴露出的 meta 不完全对称，调用方可见行为会不一致。
 
-### 10.5 运行时 tunnel 表是进程内状态，不是持久注册表
+### 10.4 运行时 tunnel 表是进程内状态，不是持久注册表
 
 `client` / `node` 当前依赖一份运行期维护的 `tunnel_id -> { Idle | Borrowed }` 表来区分“busy”与“not found”。
 
 这意味着：
 
-- 它只描述当前实例在本进程内已经见过并成功借出过的 tunnel
+- 它只描述当前实例在本进程内已经见过并成功借出过的 `(peer_id, tunnel_id)` tunnel
 - 它不是独立于 pool/连接生命周期的持久真值源
 - 如果后续再引入跨实例共享、外部恢复或更复杂的迁移语义，需要重新定义这张表和底层连接状态的同步方式
 
@@ -376,6 +359,5 @@ client/server 共用 `gen_resp_id()` 生成 waiter key。
 
 1. 统一 server 各发送接口在“无连接 / 跳过 / 写失败 / 超时”下的错误分类。
 2. 明确 broadcast 是否要保持 best-effort；若保持，最好在命名或返回类型上体现。
-3. 为 `send_by_specify_tunnel*` 增加 `peer_id` 一致性校验，或在 API 文档里明确说明忽略 `peer_id`。
-4. 统一 `tunnel_meta` 的权威来源。
-5. 如果后续还要把“存在但 busy 则等待”的语义下沉到公共层，应考虑为 `sfo-pool` 增加新策略或新 API，而不是直接改掉现有 `get_classified_worker()` 的扩容语义。
+3. 统一 `tunnel_meta` 的权威来源。
+4. 如果后续还要把“存在但 busy 则等待”的语义下沉到公共层，应考虑为 `sfo-pool` 增加新策略或新 API，而不是直接改掉现有 `get_classified_worker()` 的扩容语义。

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct CachedPeerInfo {
-    pub conn_list: Vec<TunnelId>,
+struct CachedPeerInfo {
+    conn_list: Vec<TunnelId>,
 }
 
 pub struct PeerManager<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> {
@@ -45,11 +45,12 @@ impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M,
                 .unwrap()
                 .insert(conn_id, (peer_id.clone(), Arc::new(conn)));
             let mut device_conn_map = self.device_conn_map.lock().unwrap();
-            let peer_info = device_conn_map
-                .entry(peer_id.clone())
-                .or_insert(CachedPeerInfo {
-                    conn_list: Vec::new(),
-                });
+            let peer_info =
+                device_conn_map
+                    .entry(peer_id.clone())
+                    .or_insert_with(|| CachedPeerInfo {
+                        conn_list: Vec::new(),
+                    });
             peer_info.conn_list.push(conn_id);
             peer_info.conn_list.len()
         };
@@ -65,43 +66,48 @@ impl<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>> PeerManager<M,
     }
 
     pub async fn remove_peer_connection(&self, conn_id: TunnelId) {
-        let mut peer_id = None;
-        {
+        let disconnected_peer = {
             let mut conn_cache = self.conn_cache.lock().unwrap();
-            if let Some(conn) = conn_cache.remove(&conn_id) {
+            let mut disconnected_peer = None;
+            if let Some((peer_id, _)) = conn_cache.remove(&conn_id) {
                 let mut device_conn_map = self.device_conn_map.lock().unwrap();
-                if let Some(peer_info) = device_conn_map.get_mut(&conn.0) {
-                    peer_info.conn_list.retain(|&id| id != conn_id);
+                if let Some(peer_info) = device_conn_map.get_mut(&peer_id) {
+                    peer_info.conn_list.retain(|id| *id != conn_id);
                     if peer_info.conn_list.is_empty() {
-                        device_conn_map.remove(&conn.0);
-                        peer_id = Some(conn.0.clone());
+                        device_conn_map.remove(&peer_id);
+                        disconnected_peer = Some(peer_id);
                     }
                 }
             }
-        }
-        if peer_id.is_some() {
-            let _ = self
-                .listener
-                .on_peer_disconnected(peer_id.as_ref().unwrap())
-                .await;
+            disconnected_peer
+        };
+        if let Some(peer_id) = disconnected_peer {
+            let _ = self.listener.on_peer_disconnected(&peer_id).await;
         }
     }
 
-    pub fn find_connection(&self, conn_id: TunnelId) -> Option<Arc<PeerConnection<R, W>>> {
+    pub fn find_connection(
+        &self,
+        peer_id: &PeerId,
+        conn_id: TunnelId,
+    ) -> Option<Arc<PeerConnection<R, W>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
-        conn_cache.get(&conn_id).map(|c| c.1.clone())
+        conn_cache
+            .get(&conn_id)
+            .filter(|(stored_peer_id, _)| stored_peer_id == peer_id)
+            .map(|(_, conn)| conn.clone())
     }
 
-    pub fn find_connections(&self, device_id: &PeerId) -> Vec<Arc<PeerConnection<R, W>>> {
+    pub fn find_connections(&self, peer_id: &PeerId) -> Vec<Arc<PeerConnection<R, W>>> {
         let conn_cache = self.conn_cache.lock().unwrap();
         let device_conn_map = self.device_conn_map.lock().unwrap();
         device_conn_map
-            .get(device_id)
-            .map(|conns| {
-                conns
+            .get(peer_id)
+            .map(|peer_info| {
+                peer_info
                     .conn_list
                     .iter()
-                    .filter_map(|c| conn_cache.get(c).map(|c| c.1.clone()))
+                    .filter_map(|conn_id| conn_cache.get(conn_id).map(|(_, conn)| conn.clone()))
                     .collect()
             })
             .unwrap_or_default()

@@ -2,7 +2,7 @@ mod classified_node;
 mod node;
 
 use crate::client::{CmdSend, SendGuard};
-use crate::cmd::CmdBodyRead;
+use crate::cmd::{CmdBodyRead, copy_cmd_body, decode_pkg_len, encode_pkg_len};
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::{
     CmdBody, CmdHandler, CmdHeader, CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite, PeerId, TunnelId,
@@ -405,16 +405,15 @@ pub(crate) fn create_recv_handle<
                 }
                 let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice())
                     .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                let (body_len, body_len_usize) = decode_pkg_len(header.pkg_len())?;
                 log::trace!(
                     "tunnel {:?} recv cmd {:?} from {} len {}",
                     tunnel_id,
                     header.cmd_code(),
                     remote_id.to_base36(),
-                    header.pkg_len().to_u64().unwrap()
+                    body_len
                 );
-                let body_len = header.pkg_len().to_u64().unwrap();
-                let (cmd_read, completion) =
-                    CmdBodyRead::new(reader, header.pkg_len().to_u64().unwrap() as usize);
+                let (cmd_read, completion) = CmdBodyRead::new(reader, body_len_usize);
                 {
                     let version = header.version();
                     let seq = header.seq();
@@ -437,7 +436,7 @@ pub(crate) fn create_recv_handle<
                                 true,
                                 seq,
                                 cmd_code,
-                                LEN::from_u64(body.len()).unwrap(),
+                                encode_pkg_len::<LEN>(body.len())?,
                             );
                             let buf = header
                                 .to_vec()
@@ -456,9 +455,7 @@ pub(crate) fn create_recv_handle<
                                 .write_all(buf.as_slice())
                                 .await
                                 .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                            tokio::io::copy(&mut body, write.deref_mut().deref_mut())
-                                .await
-                                .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                            copy_cmd_body(&mut body, write.deref_mut().deref_mut()).await?;
                             write
                                 .flush()
                                 .await

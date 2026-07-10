@@ -1,6 +1,7 @@
 use crate::client::{
-    ClassifiedCmdSend, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite, RespWaiter,
-    RespWaiterRef, TrackedSendGuard, TunnelReserveResult, TunnelRuntimeRegistry, gen_resp_id,
+    ClassifiedCmdSend, ClassifiedCmdTunnelRead, ClassifiedCmdTunnelWrite, CmdSend, RespWaiter,
+    RespWaiterRef, TrackedSendGuard, TunnelReservationGuard, TunnelReserveResult,
+    TunnelRuntimeRegistry, gen_resp_id,
 };
 use crate::cmd::CmdHandlerMap;
 use crate::errors::{CmdErrorCode, CmdResult, into_cmd_err};
@@ -15,7 +16,8 @@ use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{
     ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool,
-    ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, WorkerClassification,
+    ClassifiedWorkerPoolConfig, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult,
+    WorkerClassification,
 };
 use sfo_split::Splittable;
 use std::collections::HashMap;
@@ -28,19 +30,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::yield_now;
 
-#[derive(Debug, Clone, Eq, Hash)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct CmdNodeTunnelClassification<C: WorkerClassification> {
     pub peer_id: Option<PeerId>,
     pub tunnel_id: Option<TunnelId>,
     pub classification: Option<C>,
-}
-
-impl<C: WorkerClassification> PartialEq for CmdNodeTunnelClassification<C> {
-    fn eq(&self, other: &Self) -> bool {
-        self.peer_id == other.peer_id
-            && self.tunnel_id == other.tunnel_id
-            && self.classification == other.classification
-    }
 }
 
 impl<C, M, R, W, LEN, CMD> ClassifiedWorker<CmdNodeTunnelClassification<C>>
@@ -529,8 +523,12 @@ impl<
                 let waiter = waiter.clone();
                 async move {
                     if header.is_resp() && header.seq().is_some() {
-                        let resp_id =
-                            gen_resp_id(tunnel_id, header.cmd_code(), header.seq().unwrap());
+                        let resp_id = gen_resp_id(
+                            &peer_id,
+                            tunnel_id,
+                            header.cmd_code(),
+                            header.seq().unwrap(),
+                        );
                         let _ = waiter.set_result(resp_id, body_read);
                         Ok(None)
                     } else {
@@ -547,7 +545,14 @@ impl<
             resp_waiter.clone(),
         );
         Arc::new(Self {
-            tunnel_pool: ClassifiedWorkerPool::new(tunnel_count, write_factory.clone()),
+            tunnel_pool: ClassifiedWorkerPool::new(
+                write_factory.clone(),
+                ClassifiedWorkerPoolConfig {
+                    max_count: Some(tunnel_count),
+                    idle_timeout: None,
+                    max_count_per_classification: None,
+                },
+            ),
             write_factory,
             runtime_tunnels: TunnelRuntimeRegistry::new(),
             cmd_handler_map,
@@ -567,14 +572,24 @@ impl<
         >,
     ) -> ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD> {
         let tunnel_id = worker_guard.get_tunnel_id();
-        TrackedSendGuard::new(worker_guard, self.runtime_tunnels.clone(), tunnel_id)
+        let peer_id = worker_guard.get_remote_peer_id();
+        TrackedSendGuard::new(
+            worker_guard,
+            self.runtime_tunnels.clone(),
+            peer_id,
+            tunnel_id,
+        )
     }
 
-    async fn reserve_tunnel(&self, tunnel_id: TunnelId) -> CmdResult<()> {
+    async fn reserve_tunnel(
+        &self,
+        peer_id: &PeerId,
+        tunnel_id: TunnelId,
+    ) -> CmdResult<TunnelReservationGuard> {
         loop {
-            match self.runtime_tunnels.reserve_existing(tunnel_id) {
-                TunnelReserveResult::Acquired => return Ok(()),
-                TunnelReserveResult::Wait(waiter) => waiter.notified().await,
+            match self.runtime_tunnels.reserve_existing(peer_id, tunnel_id) {
+                TunnelReserveResult::Acquired(reservation) => return Ok(reservation),
+                TunnelReserveResult::Wait(waiter) => waiter.wait().await,
                 TunnelReserveResult::Missing => return Err(Self::tunnel_not_found(tunnel_id)),
             }
         }
@@ -595,7 +610,11 @@ impl<
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
             let tunnel_id = worker_guard.get_tunnel_id();
-            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+            let actual_peer_id = worker_guard.get_remote_peer_id();
+            if self
+                .runtime_tunnels
+                .mark_borrowed(actual_peer_id, tunnel_id)
+            {
                 return Ok(self.tracked_send_guard(worker_guard));
             }
             drop(worker_guard);
@@ -608,7 +627,7 @@ impl<
         peer_id: PeerId,
         tunnel_id: TunnelId,
     ) -> CmdResult<ClassifiedCmdNodeSendGuard<C, M, R, W, F, LEN, CMD>> {
-        self.reserve_tunnel(tunnel_id).await?;
+        let reservation = self.reserve_tunnel(&peer_id, tunnel_id).await?;
         match self
             .tunnel_pool
             .get_classified_worker(CmdNodeTunnelClassification {
@@ -618,9 +637,13 @@ impl<
             })
             .await
         {
-            Ok(worker_guard) => Ok(self.tracked_send_guard(worker_guard)),
+            Ok(worker_guard) => {
+                let worker_guard = self.tracked_send_guard(worker_guard);
+                reservation.commit();
+                Ok(worker_guard)
+            }
             Err(_) => {
-                self.runtime_tunnels.remove(tunnel_id);
+                reservation.invalidate();
                 Err(Self::tunnel_not_found(tunnel_id))
             }
         }
@@ -641,7 +664,8 @@ impl<
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
             let tunnel_id = worker_guard.get_tunnel_id();
-            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+            let peer_id = worker_guard.get_remote_peer_id();
+            if self.runtime_tunnels.mark_borrowed(peer_id, tunnel_id) {
                 return Ok(self.tracked_send_guard(worker_guard));
             }
             drop(worker_guard);
@@ -665,7 +689,11 @@ impl<
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
             let tunnel_id = worker_guard.get_tunnel_id();
-            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+            let actual_peer_id = worker_guard.get_remote_peer_id();
+            if self
+                .runtime_tunnels
+                .mark_borrowed(actual_peer_id, tunnel_id)
+            {
                 return Ok(self.tracked_send_guard(worker_guard));
             }
             drop(worker_guard);

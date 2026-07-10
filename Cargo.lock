@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "sfo-cmd-server"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "as-any",
  "async-named-locker",
@@ -1386,7 +1386,6 @@ dependencies = [
  "callback-result",
  "callback-trait",
  "futures-lite",
- "hex",
  "log",
  "num",
  "pin-project-lite",
@@ -1414,9 +1413,9 @@ dependencies = [
 
 [[package]]
 name = "sfo-pool"
-version = "0.2.7"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6829959086638ec628671eb1a6b12da8b873e4697c04cdf6448606a03fe73f29"
+checksum = "7255fc7cd89802da74e4320ca5116bc401160a16c08a56608ff39fae8c131774"
 dependencies = [
  "async-trait",
  "notify-future 0.2.4",

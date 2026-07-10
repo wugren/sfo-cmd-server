@@ -1,8 +1,11 @@
 use crate::client::{
     ClassifiedCmdClient, CmdClient, CmdSend, RespWaiter, RespWaiterRef, TrackedSendGuard,
-    TunnelReserveResult, TunnelRuntimeRegistry, gen_resp_id, gen_seq,
+    TunnelReservationGuard, TunnelReserveResult, TunnelRuntimeRegistry, gen_resp_id, gen_seq,
 };
-use crate::cmd::{CmdBodyRead, CmdHandler, CmdHandlerMap, CmdHeader};
+use crate::cmd::{
+    CmdBodyRead, CmdHandler, CmdHandlerMap, CmdHeader, copy_cmd_body, decode_pkg_len,
+    encode_pkg_len,
+};
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::peer_id::PeerId;
 use crate::{CmdBody, CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
@@ -11,8 +14,8 @@ use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom
 use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{
     ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool,
-    ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult, WorkerClassification, into_pool_err,
-    pool_err,
+    ClassifiedWorkerPoolConfig, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult,
+    WorkerClassification, into_pool_err, pool_err,
 };
 use sfo_split::{RHalf, Splittable, WHalf};
 use std::fmt::Debug;
@@ -41,16 +44,10 @@ pub type ClassifiedCmdTunnel<R, W> = Splittable<R, W>;
 pub type ClassifiedCmdTunnelRHalf<R, W> = RHalf<R, W>;
 pub type ClassifiedCmdTunnelWHalf<R, W> = WHalf<R, W>;
 
-#[derive(Debug, Clone, Copy, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct CmdClientTunnelClassification<C: WorkerClassification> {
     tunnel_id: Option<TunnelId>,
     classification: Option<C>,
-}
-
-impl<C: WorkerClassification> PartialEq for CmdClientTunnelClassification<C> {
-    fn eq(&self, other: &Self) -> bool {
-        self.tunnel_id == other.tunnel_id && self.classification == other.classification
-    }
 }
 
 #[async_trait::async_trait]
@@ -173,18 +170,17 @@ where
 
     pub async fn send(&mut self, cmd: CMD, version: u8, body: &[u8]) -> CmdResult<()> {
         log::trace!(
-            "client {:?} send cmd: {:?}, len: {}, data: {}",
+            "client {:?} send cmd: {:?}, len: {}",
             self.tunnel_id,
             cmd,
-            body.len(),
-            hex::encode(body)
+            body.len()
         );
         let header = CmdHeader::<LEN, CMD>::new(
             version,
             false,
             None,
             cmd,
-            LEN::from_u64(body.len() as u64).unwrap(),
+            encode_pkg_len::<LEN>(body.len() as u64)?,
         );
         let buf = header
             .to_vec()
@@ -213,11 +209,10 @@ where
             }
         }
         log::trace!(
-            "client {:?} send cmd: {:?}, len: {}, data: {}",
+            "client {:?} send cmd: {:?}, len: {}",
             self.tunnel_id,
             cmd,
-            body.len(),
-            hex::encode(body)
+            body.len()
         );
         let seq = gen_seq();
         let header = CmdHeader::<LEN, CMD>::new(
@@ -225,12 +220,12 @@ where
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(body.len() as u64).unwrap(),
+            encode_pkg_len::<LEN>(body.len() as u64)?,
         );
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(self.tunnel_id, cmd, seq);
+        let resp_id = gen_resp_id(&self.remote_id, self.tunnel_id, cmd, seq);
         let waiter = self.resp_waiter.clone();
         let resp_waiter = waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -253,12 +248,6 @@ where
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::trace!(
-                "client {:?} send2 cmd {:?} body: {}",
-                self.tunnel_id,
-                cmd,
-                hex::encode(b)
-            );
         }
         log::trace!(
             "client {:?} send2 cmd: {:?}, len {}",
@@ -271,7 +260,7 @@ where
             false,
             None,
             cmd,
-            LEN::from_u64(len as u64).unwrap(),
+            encode_pkg_len::<LEN>(len as u64)?,
         );
         let buf = header
             .to_vec()
@@ -302,12 +291,6 @@ where
         let mut len = 0;
         for b in body.iter() {
             len += b.len();
-            log::trace!(
-                "client {:?} send2 cmd {:?} body: {}",
-                self.tunnel_id,
-                cmd,
-                hex::encode(b)
-            );
         }
         log::trace!(
             "client {:?} send2 cmd: {:?}, len {}",
@@ -321,12 +304,12 @@ where
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(len as u64).unwrap(),
+            encode_pkg_len::<LEN>(len as u64)?,
         );
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(self.tunnel_id, cmd, seq);
+        let resp_id = gen_resp_id(&self.remote_id, self.tunnel_id, cmd, seq);
         let waiter = self.resp_waiter.clone();
         let resp_waiter = waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -375,7 +358,7 @@ where
             false,
             None,
             cmd,
-            LEN::from_u64(body.len()).unwrap(),
+            encode_pkg_len::<LEN>(body.len())?,
         );
         let buf = header
             .to_vec()
@@ -415,12 +398,12 @@ where
             false,
             Some(seq),
             cmd,
-            LEN::from_u64(body.len()).unwrap(),
+            encode_pkg_len::<LEN>(body.len())?,
         );
         let buf = header
             .to_vec()
             .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
-        let resp_id = gen_resp_id(self.tunnel_id, cmd, seq);
+        let resp_id = gen_resp_id(&self.remote_id, self.tunnel_id, cmd, seq);
         let waiter = self.resp_waiter.clone();
         let resp_waiter = waiter
             .create_timeout_result_future(resp_id, timeout)
@@ -502,9 +485,7 @@ where
             .write_all(header)
             .await
             .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-        tokio::io::copy(&mut body, write.deref_mut().deref_mut())
-            .await
-            .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+        copy_cmd_body(&mut body, write.deref_mut().deref_mut()).await?;
         write
             .flush()
             .await
@@ -716,16 +697,15 @@ impl<
                     }
                     let header = CmdHeader::<LEN, CMD>::clone_from_slice(header.as_slice())
                         .map_err(into_cmd_err!(CmdErrorCode::RawCodecError))?;
+                    let (body_len, body_len_usize) = decode_pkg_len(header.pkg_len())?;
                     log::trace!(
                         "recv cmd {:?} from {} len {} tunnel {:?}",
                         header.cmd_code(),
                         peer_id,
-                        header.pkg_len().to_u64().unwrap(),
+                        body_len,
                         tunnel_id
                     );
-                    let body_len = header.pkg_len().to_u64().unwrap();
-                    let (cmd_read, completion) =
-                        CmdBodyRead::new(recv, header.pkg_len().to_u64().unwrap() as usize);
+                    let (cmd_read, completion) = CmdBodyRead::new(recv, body_len_usize);
                     let version = header.version();
                     let seq = header.seq();
                     let cmd_code = header.cmd_code();
@@ -746,7 +726,7 @@ impl<
                                 true,
                                 seq,
                                 cmd_code,
-                                LEN::from_u64(body.len()).unwrap(),
+                                encode_pkg_len::<LEN>(body.len())?,
                             );
                             let buf = header
                                 .to_vec()
@@ -765,9 +745,7 @@ impl<
                                 .write_all(buf.as_slice())
                                 .await
                                 .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
-                            tokio::io::copy(&mut body, write.deref_mut().deref_mut())
-                                .await
-                                .map_err(into_cmd_err!(CmdErrorCode::IoError))?;
+                            copy_cmd_body(&mut body, write.deref_mut().deref_mut()).await?;
                             write
                                 .flush()
                                 .await
@@ -883,7 +861,6 @@ impl<
         let waiter = resp_waiter.clone();
         Arc::new(Self {
             tunnel_pool: ClassifiedWorkerPool::new(
-                tunnel_count,
                 ClassifiedCmdWriteFactory::<C, M, R, W, _, LEN, CMD>::new(
                     factory,
                     move |local_id: PeerId,
@@ -896,6 +873,7 @@ impl<
                         async move {
                             if header.is_resp() && header.seq().is_some() {
                                 let resp_id = gen_resp_id(
+                                    &peer_id,
                                     tunnel_id,
                                     header.cmd_code(),
                                     header.seq().unwrap(),
@@ -915,6 +893,11 @@ impl<
                     },
                     resp_waiter.clone(),
                 ),
+                ClassifiedWorkerPoolConfig {
+                    max_count: Some(tunnel_count),
+                    idle_timeout: None,
+                    max_count_per_classification: None,
+                },
             ),
             runtime_tunnels: TunnelRuntimeRegistry::new(),
             cmd_handler_map,
@@ -930,14 +913,20 @@ impl<
         >,
     ) -> ClassifiedClientSendGuard<C, M, R, W, F, LEN, CMD> {
         let tunnel_id = worker_guard.get_tunnel_id();
-        TrackedSendGuard::new(worker_guard, self.runtime_tunnels.clone(), tunnel_id)
+        let peer_id = worker_guard.get_remote_peer_id();
+        TrackedSendGuard::new(
+            worker_guard,
+            self.runtime_tunnels.clone(),
+            peer_id,
+            tunnel_id,
+        )
     }
 
-    async fn reserve_tunnel(&self, tunnel_id: TunnelId) -> CmdResult<()> {
+    async fn reserve_tunnel(&self, tunnel_id: TunnelId) -> CmdResult<TunnelReservationGuard> {
         loop {
-            match self.runtime_tunnels.reserve_existing(tunnel_id) {
-                TunnelReserveResult::Acquired => return Ok(()),
-                TunnelReserveResult::Wait(waiter) => waiter.notified().await,
+            match self.runtime_tunnels.reserve_existing_tunnel(tunnel_id) {
+                TunnelReserveResult::Acquired(reservation) => return Ok(reservation),
+                TunnelReserveResult::Wait(waiter) => waiter.wait().await,
                 TunnelReserveResult::Missing => return Err(Self::tunnel_not_found(tunnel_id)),
             }
         }
@@ -951,7 +940,8 @@ impl<
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
             let tunnel_id = worker_guard.get_tunnel_id();
-            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+            let peer_id = worker_guard.get_remote_peer_id();
+            if self.runtime_tunnels.mark_borrowed(peer_id, tunnel_id) {
                 return Ok(self.tracked_send_guard(worker_guard));
             }
             drop(worker_guard);
@@ -963,7 +953,7 @@ impl<
         &self,
         tunnel_id: TunnelId,
     ) -> CmdResult<ClassifiedClientSendGuard<C, M, R, W, F, LEN, CMD>> {
-        self.reserve_tunnel(tunnel_id).await?;
+        let reservation = self.reserve_tunnel(tunnel_id).await?;
         match self
             .tunnel_pool
             .get_classified_worker(CmdClientTunnelClassification {
@@ -972,9 +962,13 @@ impl<
             })
             .await
         {
-            Ok(worker_guard) => Ok(self.tracked_send_guard(worker_guard)),
+            Ok(worker_guard) => {
+                let worker_guard = self.tracked_send_guard(worker_guard);
+                reservation.commit();
+                Ok(worker_guard)
+            }
             Err(_) => {
-                self.runtime_tunnels.remove(tunnel_id);
+                reservation.invalidate();
                 Err(Self::tunnel_not_found(tunnel_id))
             }
         }
@@ -994,7 +988,8 @@ impl<
                 .await
                 .map_err(into_cmd_err!(CmdErrorCode::Failed, "get worker failed"))?;
             let tunnel_id = worker_guard.get_tunnel_id();
-            if self.runtime_tunnels.mark_borrowed(tunnel_id) {
+            let peer_id = worker_guard.get_remote_peer_id();
+            if self.runtime_tunnels.mark_borrowed(peer_id, tunnel_id) {
                 return Ok(self.tracked_send_guard(worker_guard));
             }
             drop(worker_guard);

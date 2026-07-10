@@ -1,9 +1,13 @@
 use bucky_raw_codec::{RawDecode, RawEncode};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Ord, PartialEq, Eq, Debug, RawEncode, RawDecode)]
+const TUNNEL_ID_EPOCH_MILLIS: u128 = 1_577_577_600_000;
+const TUNNEL_ID_TICK_MILLIS: u128 = 100;
+const TUNNEL_ID_SPACE: u128 = u32::MAX as u128 + 1;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, RawEncode, RawDecode)]
 pub struct TunnelId(u32);
 
 impl TunnelId {
@@ -11,36 +15,15 @@ impl TunnelId {
         self.0
     }
 
-    fn now(_now: u64) -> u32 {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as u32;
-        let since_2021 = Duration::from_secs((50 * 365 + 9) * 24 * 3600).as_secs() as u32;
-        // TODO: 用10年？
-        (now - since_2021) * 10
+    fn from_unix_millis(now_millis: u128) -> u32 {
+        let elapsed_millis = now_millis.saturating_sub(TUNNEL_ID_EPOCH_MILLIS);
+        let ticks = elapsed_millis / TUNNEL_ID_TICK_MILLIS;
+        (ticks % TUNNEL_ID_SPACE) as u32
     }
 
     // fn time_bits() -> usize {
     //     20
     // }
-}
-
-impl PartialOrd for TunnelId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if self.0 == 0 || other.0 == 0 {
-            self.0.partial_cmp(&other.0)
-        } else if (std::cmp::max(self.0, other.0) - std::cmp::min(self.0, other.0)) > (u32::MAX / 2)
-        {
-            Some(if self.0 > other.0 {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            })
-        } else {
-            self.0.partial_cmp(&other.0)
-        }
-    }
 }
 
 impl Default for TunnelId {
@@ -75,11 +58,11 @@ impl From<TunnelId> for TunnelIdGenerator {
 
 impl TunnelIdGenerator {
     pub fn new() -> Self {
-        let now = TunnelId::now(
+        let now = TunnelId::from_unix_millis(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+                .unwrap_or_default()
+                .as_millis(),
         );
         Self {
             cur: AtomicU32::new(now),
@@ -98,7 +81,24 @@ impl TunnelIdGenerator {
 
 #[cfg(test)]
 mod tests {
-    use super::{TunnelId, TunnelIdGenerator};
+    use super::{
+        TUNNEL_ID_EPOCH_MILLIS, TUNNEL_ID_SPACE, TUNNEL_ID_TICK_MILLIS, TunnelId, TunnelIdGenerator,
+    };
+
+    #[test]
+    fn time_seed_saturates_before_epoch_and_wraps_without_overflow() {
+        assert_eq!(TunnelId::from_unix_millis(0), 0);
+        assert_eq!(
+            TunnelId::from_unix_millis(TUNNEL_ID_EPOCH_MILLIS + TUNNEL_ID_TICK_MILLIS),
+            1
+        );
+        assert_eq!(
+            TunnelId::from_unix_millis(
+                TUNNEL_ID_EPOCH_MILLIS + TUNNEL_ID_SPACE * TUNNEL_ID_TICK_MILLIS
+            ),
+            0
+        );
+    }
 
     #[test]
     fn generator_skips_zero_and_increments() {
@@ -110,21 +110,5 @@ mod tests {
         assert_eq!(first.value(), 1);
         assert_eq!(second.value(), 2);
         assert_eq!(third.value(), 3);
-    }
-
-    #[test]
-    fn partial_ord_wrap_around_behavior() {
-        let near_max = TunnelId::from(u32::MAX - 10);
-        let small = TunnelId::from(10);
-        assert!(near_max < small);
-        assert!(small > near_max);
-    }
-
-    #[test]
-    fn partial_ord_zero_follows_natural_order() {
-        let zero = TunnelId::from(0);
-        let one = TunnelId::from(1);
-        assert!(zero < one);
-        assert!(one > zero);
     }
 }
