@@ -3,7 +3,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
-use num::{FromPrimitive, ToPrimitive};
 use sfo_cmd_server::client::{
     ClassifiedCmdClient, ClassifiedCmdTunnelFactory, ClassifiedCmdTunnelRead,
     ClassifiedCmdTunnelWrite, CmdClient, CmdSend, CmdTunnelFactory, DefaultClassifiedCmdClient,
@@ -16,7 +15,7 @@ use sfo_cmd_server::server::{
 use sfo_cmd_server::{
     ClassifiedCmdNode, ClassifiedCmdNodeTunnelFactory, CmdBody, CmdHeader, CmdNode,
     CmdNodeTunnelClassification, CmdNodeTunnelFactory, CmdTunnel, DefaultClassifiedCmdNode,
-    DefaultCmdNode, PeerId, TunnelId,
+    DefaultCmdNode, PeerId, TunnelId, U16, U24,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, split};
 use tokio::sync::{Mutex, mpsc};
@@ -413,15 +412,7 @@ async fn attach_normal_server_tunnel<LEN>(
     server_id: PeerId,
 ) -> PeerProbe
 where
-    LEN: RawEncode
-        + for<'de> RawDecode<'de>
-        + Copy
-        + RawFixedBytes
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: sfo_cmd_server::CmdPkgLen,
 {
     let (client_stream, server_stream) = tokio::io::duplex(8 * 1024);
     let (client_read, client_write) = split(client_stream);
@@ -449,7 +440,7 @@ where
 }
 
 async fn attach_failable_server_tunnel(
-    server: &std::sync::Arc<DefaultCmdServerService<(), MockRead, MaybeFailWrite, u16, u8>>,
+    server: &std::sync::Arc<DefaultCmdServerService<(), MockRead, MaybeFailWrite, U16, u8>>,
     client_id: PeerId,
     server_id: PeerId,
     fail_writes: bool,
@@ -555,24 +546,16 @@ async fn recv_tunnel_id(rx: &mut mpsc::UnboundedReceiver<TunnelId>) -> TunnelId 
         .expect("tunnel id channel closed")
 }
 
-async fn read_frame<CMD>(probe: &mut PeerProbe) -> (CmdHeader<u16, CMD>, Vec<u8>)
+async fn read_frame<CMD>(probe: &mut PeerProbe) -> (CmdHeader<U16, CMD>, Vec<u8>)
 where
     CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
 {
-    read_frame_with_len::<u16, CMD>(probe).await
+    read_frame_with_len::<U16, CMD>(probe).await
 }
 
 async fn read_frame_with_len<LEN, CMD>(probe: &mut PeerProbe) -> (CmdHeader<LEN, CMD>, Vec<u8>)
 where
-    LEN: RawEncode
-        + for<'de> RawDecode<'de>
-        + Copy
-        + RawFixedBytes
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: sfo_cmd_server::CmdPkgLen,
     CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
 {
     let header_len = probe.read.read_u8().await.unwrap();
@@ -589,15 +572,7 @@ async fn write_response_with_len<LEN, CMD>(
     request: &CmdHeader<LEN, CMD>,
     body: &[u8],
 ) where
-    LEN: RawEncode
-        + for<'de> RawDecode<'de>
-        + Copy
-        + RawFixedBytes
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: sfo_cmd_server::CmdPkgLen,
     CMD: RawEncode + for<'de> RawDecode<'de> + Copy + RawFixedBytes + Send + Sync + 'static,
 {
     let header = CmdHeader::<LEN, CMD>::new(
@@ -622,11 +597,11 @@ async fn default_client_server_bidirectional_request_response_and_timeout() {
     let (server_listener, server_tx) = NormalEndpoint::new();
     let (client_factory, client_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     let (server_recv_tx, mut server_recv_rx) = mpsc::unbounded_channel::<String>();
     server.register_cmd_handler(
         0x11,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let server_recv_tx = server_recv_tx.clone();
             async move {
                 server_recv_tx.send(body.into_string().await?).unwrap();
@@ -635,11 +610,11 @@ async fn default_client_server_bidirectional_request_response_and_timeout() {
         },
     );
 
-    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, u16, u8>::new(client_factory, 4);
+    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, U16, u8>::new(client_factory, 4);
     let (client_recv_tx, mut client_recv_rx) = mpsc::unbounded_channel::<String>();
     client.register_cmd_handler(
         0x12,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let client_recv_tx = client_recv_tx.clone();
             async move {
                 client_recv_tx.send(body.into_string().await?).unwrap();
@@ -681,12 +656,12 @@ async fn classified_client_server_communication() {
     let (server_listener, server_tx) = ClassifiedEndpoint::new();
     let (client_factory, client_tx) = ClassifiedEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, U16, u8, _>::new(
         server_listener,
     );
     server.register_cmd_handler(
         0x21,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "server-classified-reply".to_owned(),
             )))
@@ -699,12 +674,12 @@ async fn classified_client_server_communication() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
     >::new(client_factory, 2);
     client.register_cmd_handler(
         0x22,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "client-classified-reply".to_owned(),
             )))
@@ -756,7 +731,7 @@ async fn default_client_specified_tunnel_waits_for_busy_guard() {
     let (server_listener, server_tx) = NormalEndpoint::new();
     let (client_factory, client_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     let (tunnel_tx, mut tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
     let recv_tx_23 = recv_tx.clone();
@@ -764,7 +739,7 @@ async fn default_client_specified_tunnel_waits_for_busy_guard() {
 
     server.register_cmd_handler(
         0x23,
-        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let tunnel_tx = tunnel_tx.clone();
             let recv_tx = recv_tx_23.clone();
             async move {
@@ -776,7 +751,7 @@ async fn default_client_specified_tunnel_waits_for_busy_guard() {
     );
     server.register_cmd_handler(
         0x24,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_24.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -785,7 +760,7 @@ async fn default_client_specified_tunnel_waits_for_busy_guard() {
         },
     );
 
-    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, u16, u8>::new(client_factory, 4);
+    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, U16, u8>::new(client_factory, 4);
     server.start();
     wire_normal_connection(&server_tx, &client_tx, client_id, server_id).await;
 
@@ -817,7 +792,7 @@ async fn classified_client_specified_tunnel_waits_for_busy_classified_guard() {
     let (server_listener, server_tx) = ClassifiedEndpoint::new();
     let (client_factory, client_tx) = ClassifiedEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, U16, u8, _>::new(
         server_listener,
     );
     let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
@@ -826,7 +801,7 @@ async fn classified_client_specified_tunnel_waits_for_busy_classified_guard() {
 
     server.register_cmd_handler(
         0x25,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_25.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -836,7 +811,7 @@ async fn classified_client_specified_tunnel_waits_for_busy_classified_guard() {
     );
     server.register_cmd_handler(
         0x26,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_26.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -851,7 +826,7 @@ async fn classified_client_specified_tunnel_waits_for_busy_classified_guard() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
     >::new(client_factory, 2);
 
@@ -904,22 +879,22 @@ async fn default_node_server_bidirectional_request_response() {
     let (node_factory, node_factory_tx) = NormalEndpoint::new();
     let (node_listener, _node_listener_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     server.register_cmd_handler(
         0x31,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string("server-node-reply".to_owned())))
         },
     );
 
-    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_listener,
         node_factory,
         4,
     );
     node.register_cmd_handler(
         0x32,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string("node-reply".to_owned())))
         },
     );
@@ -961,17 +936,17 @@ async fn default_nodes_form_mesh_and_communicate_bidirectionally() {
     let (node_c_listener, node_c_listener_tx) = NormalEndpoint::new();
     let (node_c_factory, node_c_factory_tx) = NormalEndpoint::new();
 
-    let node_a = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node_a = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_a_listener,
         node_a_factory,
         8,
     );
-    let node_b = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node_b = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_b_listener,
         node_b_factory,
         8,
     );
-    let node_c = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node_c = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_c_listener,
         node_c_factory,
         8,
@@ -987,7 +962,7 @@ async fn default_nodes_form_mesh_and_communicate_bidirectionally() {
             move |local_id: PeerId,
                   peer_id: PeerId,
                   tunnel_id: TunnelId,
-                  _header: CmdHeader<u16, u8>,
+                  _header: CmdHeader<U16, u8>,
                   body: CmdBody| {
                 async move {
                     let body = body.into_string().await?;
@@ -1120,7 +1095,7 @@ async fn classified_nodes_form_mesh_and_communicate_bidirectionally() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_a_listener, node_a_factory, 8);
@@ -1130,7 +1105,7 @@ async fn classified_nodes_form_mesh_and_communicate_bidirectionally() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_b_listener, node_b_factory, 8);
@@ -1140,7 +1115,7 @@ async fn classified_nodes_form_mesh_and_communicate_bidirectionally() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_c_listener, node_c_factory, 8);
@@ -1155,7 +1130,7 @@ async fn classified_nodes_form_mesh_and_communicate_bidirectionally() {
             move |local_id: PeerId,
                   peer_id: PeerId,
                   tunnel_id: TunnelId,
-                  _header: CmdHeader<u16, u8>,
+                  _header: CmdHeader<U16, u8>,
                   body: CmdBody| {
                 async move {
                     let body = body.into_string().await?;
@@ -1337,14 +1312,14 @@ async fn default_node_specified_tunnel_waits_for_busy_guard() {
     let (node_factory, node_factory_tx) = NormalEndpoint::new();
     let (node_listener, _node_listener_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     let (tunnel_tx, mut tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
     let recv_tx_33 = recv_tx.clone();
     let recv_tx_34 = recv_tx.clone();
     server.register_cmd_handler(
         0x33,
-        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let tunnel_tx = tunnel_tx.clone();
             let recv_tx = recv_tx_33.clone();
             async move {
@@ -1356,7 +1331,7 @@ async fn default_node_specified_tunnel_waits_for_busy_guard() {
     );
     server.register_cmd_handler(
         0x34,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_34.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -1365,7 +1340,7 @@ async fn default_node_specified_tunnel_waits_for_busy_guard() {
         },
     );
 
-    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_listener,
         node_factory,
         4,
@@ -1410,12 +1385,12 @@ async fn classified_node_server_communication() {
     let (node_factory, node_factory_tx) = ClassifiedEndpoint::new();
     let (node_listener, _node_listener_tx) = ClassifiedEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, U16, u8, _>::new(
         server_listener,
     );
     server.register_cmd_handler(
         0x41,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "server-class-node-reply".to_owned(),
             )))
@@ -1428,13 +1403,13 @@ async fn classified_node_server_communication() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_listener, node_factory, 4);
     node.register_cmd_handler(
         0x42,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
             Ok(Some(CmdBody::from_string(
                 "classified-node-reply".to_owned(),
             )))
@@ -1504,7 +1479,7 @@ async fn classified_node_specified_tunnel_waits_for_busy_guard() {
     let (node_factory, node_factory_tx) = ClassifiedEndpoint::new();
     let (node_listener, _node_listener_tx) = ClassifiedEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, U16, u8, _>::new(
         server_listener,
     );
     let (recv_tx, mut recv_rx) = mpsc::unbounded_channel::<String>();
@@ -1512,7 +1487,7 @@ async fn classified_node_specified_tunnel_waits_for_busy_guard() {
     let recv_tx_36 = recv_tx.clone();
     server.register_cmd_handler(
         0x35,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_35.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -1522,7 +1497,7 @@ async fn classified_node_specified_tunnel_waits_for_busy_guard() {
     );
     server.register_cmd_handler(
         0x36,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
             let recv_tx = recv_tx_36.clone();
             async move {
                 recv_tx.send(body.into_string().await?).unwrap();
@@ -1537,7 +1512,7 @@ async fn classified_node_specified_tunnel_waits_for_busy_guard() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_listener, node_factory, 4);
@@ -1591,13 +1566,13 @@ async fn default_client_interfaces_covered() {
     let (server_listener, server_tx) = NormalEndpoint::new();
     let (client_factory, client_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     let (server_recv_tx, mut server_recv_rx) = mpsc::unbounded_channel::<String>();
     for cmd in [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x77] {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -1616,17 +1591,17 @@ async fn default_client_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
     }
 
-    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, u16, u8>::new(client_factory, 4);
+    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, U16, u8>::new(client_factory, 4);
     let (client_tunnel_tx, mut client_tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     client.register_cmd_handler(
         0x70,
-        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<U16, u8>, _body| {
             let client_tunnel_tx = client_tunnel_tx.clone();
             async move {
                 client_tunnel_tx.send(tunnel_id).unwrap();
@@ -1758,15 +1733,15 @@ async fn server_interfaces_covered() {
     let (server_listener, server_tx) = NormalEndpoint::new();
     let (client_factory, client_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
-    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, u16, u8>::new(client_factory, 4);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
+    let client = DefaultCmdClient::<(), MockRead, MockWrite, _, U16, u8>::new(client_factory, 4);
     let (client_recv_tx, mut client_recv_rx) = mpsc::unbounded_channel::<String>();
 
     for cmd in [0x21u8, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28] {
         let tx = client_recv_tx.clone();
         client.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -1786,7 +1761,7 @@ async fn server_interfaces_covered() {
     ] {
         client.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -1927,13 +1902,13 @@ async fn default_node_interfaces_covered() {
     let (node_factory, node_factory_tx) = NormalEndpoint::new();
     let (node_listener, _node_listener_tx) = NormalEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
     let (server_recv_tx, mut server_recv_rx) = mpsc::unbounded_channel::<String>();
     for cmd in [0x51u8, 0x52, 0x53, 0x54, 0x55, 0x56, 0x97] {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -1952,13 +1927,13 @@ async fn default_node_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
     }
 
-    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, u16, u8, _>::new(
+    let node = DefaultCmdNode::<(), MockRead, MockWrite, _, U16, u8, _>::new(
         node_listener,
         node_factory,
         4,
@@ -1966,7 +1941,7 @@ async fn default_node_interfaces_covered() {
     let (node_tunnel_tx, mut node_tunnel_rx) = mpsc::unbounded_channel::<TunnelId>();
     node.register_cmd_handler(
         0x70,
-        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<u16, u8>, _body| {
+        move |_local_id, _peer_id, tunnel_id, _header: CmdHeader<U16, u8>, _body| {
             let node_tunnel_tx = node_tunnel_tx.clone();
             async move {
                 node_tunnel_tx.send(tunnel_id).unwrap();
@@ -2110,7 +2085,7 @@ async fn classified_interfaces_covered() {
     let (node_listener, node_listener_tx) = ClassifiedEndpoint::new();
     let (inbound_factory, inbound_tx) = ClassifiedEndpoint::new();
 
-    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, u16, u8, _>::new(
+    let server = DefaultCmdServer::<(), MockClassifiedRead, MockClassifiedWrite, U16, u8, _>::new(
         server_listener,
     );
     let (server_recv_tx, mut server_recv_rx) = mpsc::unbounded_channel::<String>();
@@ -2120,7 +2095,7 @@ async fn classified_interfaces_covered() {
         let tx = server_recv_tx.clone();
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| {
                 let tx = tx.clone();
                 async move {
                     tx.send(body.into_string().await?).unwrap();
@@ -2146,7 +2121,7 @@ async fn classified_interfaces_covered() {
     ] {
         server.register_cmd_handler(
             cmd,
-            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body| async move {
+            move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body| async move {
                 Ok(Some(CmdBody::from_string(resp.to_owned())))
             },
         );
@@ -2158,7 +2133,7 @@ async fn classified_interfaces_covered() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
     >::new(client_factory, 2);
 
@@ -2168,13 +2143,13 @@ async fn classified_interfaces_covered() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
         _,
     >::new(node_listener, node_factory, 2);
     node.register_cmd_handler(
         0xA0,
-        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, body: CmdBody| async move {
+        move |_local_id, _peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, body: CmdBody| async move {
             let text = body.into_string().await?;
             Ok(Some(CmdBody::from_string(format!("node-{}", text))))
         },
@@ -2186,7 +2161,7 @@ async fn classified_interfaces_covered() {
         MockClassifiedRead,
         MockClassifiedWrite,
         _,
-        u16,
+        U16,
         u8,
     >::new(inbound_factory, 1);
 
@@ -2553,7 +2528,7 @@ async fn classified_interfaces_covered() {
 async fn server_send_variants_fail_without_connection() {
     let missing_peer = peer(99);
     let (server_listener, _server_tx) = NormalEndpoint::new();
-    let server = DefaultCmdServer::<(), MockRead, MockWrite, u16, u8, _>::new(server_listener);
+    let server = DefaultCmdServer::<(), MockRead, MockWrite, U16, u8, _>::new(server_listener);
 
     assert!(
         server
@@ -2597,7 +2572,7 @@ async fn server_specified_tunnel_is_scoped_by_peer_id() {
     let connected_peer = peer(111);
     let wrong_peer = peer(112);
     let server_id = peer(113);
-    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u16, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, U16, u8>::new();
     let _probe = attach_normal_server_tunnel(&server, connected_peer.clone(), server_id).await;
     let tunnel_id = server.get_peer_tunnels(&connected_peer).await[0].conn_id;
 
@@ -2615,7 +2590,7 @@ async fn server_specified_tunnel_is_scoped_by_peer_id() {
 async fn server_send_failover_uses_next_tunnel_after_write_error() {
     let client_id = peer(101);
     let server_id = peer(102);
-    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, U16, u8>::new();
 
     let _failed_probe =
         attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
@@ -2633,7 +2608,7 @@ async fn server_send_failover_uses_next_tunnel_after_write_error() {
 async fn server_send_returns_err_when_all_connected_tunnels_fail() {
     let client_id = peer(103);
     let server_id = peer(104);
-    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, U16, u8>::new();
 
     let _probe1 =
         attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
@@ -2650,7 +2625,7 @@ async fn server_send_returns_err_when_all_connected_tunnels_fail() {
 async fn server_broadcast_is_best_effort_when_one_tunnel_fails() {
     let client_id = peer(105);
     let server_id = peer(106);
-    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, u16, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MaybeFailWrite, U16, u8>::new();
 
     let _failed_probe =
         attach_failable_server_tunnel(&server, client_id.clone(), server_id.clone(), true).await;
@@ -2678,13 +2653,13 @@ async fn server_broadcast_is_best_effort_when_one_tunnel_fails() {
 async fn server_send_cmd_streams_large_body() {
     let client_id = peer(107);
     let server_id = peer(108);
-    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u32, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, U24, u8>::new();
     let mut probe = attach_normal_server_tunnel(&server, client_id.clone(), server_id).await;
     let body = vec![0x5Au8; 256 * 1024];
     let expected = body.clone();
 
     let recv_task = tokio::spawn(async move {
-        let (header, recv_body) = read_frame_with_len::<u32, u8>(&mut probe).await;
+        let (header, recv_body) = read_frame_with_len::<U24, u8>(&mut probe).await;
         assert_eq!(header.cmd_code(), 0x45);
         assert_eq!(recv_body, expected);
     });
@@ -2701,16 +2676,16 @@ async fn server_send_cmd_streams_large_body() {
 async fn server_send_cmd_with_resp_streams_large_body() {
     let client_id = peer(109);
     let server_id = peer(110);
-    let server = DefaultCmdServerService::<(), MockRead, MockWrite, u32, u8>::new();
+    let server = DefaultCmdServerService::<(), MockRead, MockWrite, U24, u8>::new();
     let mut probe = attach_normal_server_tunnel(&server, client_id.clone(), server_id).await;
     let body = vec![0xA5u8; 256 * 1024];
     let expected = body.clone();
 
     let recv_task = tokio::spawn(async move {
-        let (header, recv_body) = read_frame_with_len::<u32, u8>(&mut probe).await;
+        let (header, recv_body) = read_frame_with_len::<U24, u8>(&mut probe).await;
         assert_eq!(header.cmd_code(), 0x46);
         assert_eq!(recv_body, expected);
-        write_response_with_len::<u32, u8>(&mut probe, &header, b"stream-ok").await;
+        write_response_with_len::<U24, u8>(&mut probe, &header, b"stream-ok").await;
     });
 
     let resp = server

@@ -11,7 +11,6 @@ use crate::peer_id::PeerId;
 use crate::{CmdBody, CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite, TunnelId};
 use async_named_locker::{NamedStateHolder, ObjectHolder};
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
-use num::{FromPrimitive, ToPrimitive};
 use sfo_split::Splittable;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -100,15 +99,7 @@ impl<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -275,15 +266,7 @@ impl<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -306,15 +289,7 @@ impl<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -1316,15 +1291,7 @@ impl<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -1380,15 +1347,7 @@ impl<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy

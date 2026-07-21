@@ -3,7 +3,6 @@ mod client;
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
 use callback_result::CallbackWaiter;
 pub use client::*;
-use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{
     ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, WorkerClassification,
 };
@@ -438,15 +437,7 @@ mod tunnel_runtime_tests {
 
 #[async_trait::async_trait]
 pub trait CmdClient<
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     M: CmdTunnelMeta,
     S: CmdSend<M>,
@@ -566,15 +557,7 @@ pub trait CmdClient<
 
 #[async_trait::async_trait]
 pub trait ClassifiedCmdClient<
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     C: WorkerClassification,
     M: CmdTunnelMeta,

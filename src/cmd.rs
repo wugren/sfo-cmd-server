@@ -1,7 +1,9 @@
 use crate::TunnelId;
 use crate::errors::{CmdErrorCode, CmdResult, cmd_err, into_cmd_err};
 use crate::peer_id::PeerId;
-use bucky_raw_codec::{RawDecode, RawEncode};
+use bucky_raw_codec::{
+    CodecError, CodecErrorCode, CodecResult, RawDecode, RawEncode, RawEncodePurpose, RawFixedBytes,
+};
 use num::{FromPrimitive, ToPrimitive};
 use sfo_split::RHalf;
 use std::collections::HashMap;
@@ -15,22 +17,247 @@ use std::{fmt, io};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 
+/// Default package length limit used by the fixed-width protocol types.
 pub const MAX_PKG_LEN: u64 = 1024 * 1024;
 
-fn validate_pkg_len(len: u64) -> CmdResult<()> {
-    if len > MAX_PKG_LEN {
+/// A fixed-width integer that can be used for [`CmdHeader::pkg_len`].
+///
+/// `MAX_PKG_LEN` is a protocol limit selected by the length type, not
+/// necessarily the largest value its underlying integer can represent. Use
+/// [`U8`], [`U16`], or [`U24`] when a different limit is required.
+pub trait CmdPkgLen:
+    RawEncode
+    + for<'de> RawDecode<'de>
+    + RawFixedBytes
+    + FromPrimitive
+    + ToPrimitive
+    + Copy
+    + Send
+    + Sync
+    + 'static
+{
+    const MAX_PKG_LEN: u64;
+}
+
+macro_rules! define_cmd_pkg_len_type {
+    ($name:ident, $inner:ty, $type_max:expr) => {
+        #[doc = concat!("An unsigned fixed-width package length backed by `", stringify!($inner), "`.")]
+        #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name<const LIMIT: u64 = MAX_PKG_LEN>($inner);
+
+        impl<const LIMIT: u64> $name<LIMIT> {
+            pub const TYPE_MAX: $inner = $type_max;
+            pub const MAX: $inner = if LIMIT > Self::TYPE_MAX as u64 {
+                Self::TYPE_MAX
+            } else {
+                LIMIT as $inner
+            };
+
+            pub const fn new(value: $inner) -> Option<Self> {
+                if value <= Self::MAX {
+                    Some(Self(value))
+                } else {
+                    None
+                }
+            }
+
+            pub const fn get(self) -> $inner {
+                self.0
+            }
+        }
+
+        impl<const LIMIT: u64> TryFrom<$inner> for $name<LIMIT> {
+            type Error = &'static str;
+
+            fn try_from(value: $inner) -> Result<Self, Self::Error> {
+                Self::new(value).ok_or(concat!("value exceeds ", stringify!($name), "::MAX"))
+            }
+        }
+
+        impl<const LIMIT: u64> From<$name<LIMIT>> for $inner {
+            fn from(value: $name<LIMIT>) -> Self {
+                value.0
+            }
+        }
+
+        impl<const LIMIT: u64> FromPrimitive for $name<LIMIT> {
+            fn from_i64(value: i64) -> Option<Self> {
+                <$inner>::try_from(value).ok().and_then(Self::new)
+            }
+
+            fn from_u64(value: u64) -> Option<Self> {
+                <$inner>::try_from(value).ok().and_then(Self::new)
+            }
+        }
+
+        impl<const LIMIT: u64> ToPrimitive for $name<LIMIT> {
+            fn to_i64(&self) -> Option<i64> {
+                Some(self.0 as i64)
+            }
+
+            fn to_u64(&self) -> Option<u64> {
+                Some(self.0 as u64)
+            }
+        }
+
+        impl<const LIMIT: u64> RawFixedBytes for $name<LIMIT> {
+            fn raw_bytes() -> Option<usize> {
+                <$inner>::raw_bytes()
+            }
+        }
+
+        impl<const LIMIT: u64> RawEncode for $name<LIMIT> {
+            fn raw_measure(&self, purpose: &Option<RawEncodePurpose>) -> CodecResult<usize> {
+                self.0.raw_measure(purpose)
+            }
+
+            fn raw_encode<'a>(
+                &self,
+                buf: &'a mut [u8],
+                purpose: &Option<RawEncodePurpose>,
+            ) -> CodecResult<&'a mut [u8]> {
+                self.0.raw_encode(buf, purpose)
+            }
+        }
+
+        impl<'de, const LIMIT: u64> RawDecode<'de> for $name<LIMIT> {
+            fn raw_decode(buf: &'de [u8]) -> CodecResult<(Self, &'de [u8])> {
+                let (value, remaining) = <$inner>::raw_decode(buf)?;
+                Ok((Self(value), remaining))
+            }
+        }
+
+        impl<const LIMIT: u64> CmdPkgLen for $name<LIMIT> {
+            const MAX_PKG_LEN: u64 = Self::MAX as u64;
+        }
+    };
+}
+
+define_cmd_pkg_len_type!(U8, u8, u8::MAX);
+define_cmd_pkg_len_type!(U16, u16, u16::MAX);
+
+/// An unsigned 24-bit integer encoded as exactly three big-endian bytes.
+///
+/// `LIMIT` controls the protocol package limit and defaults to
+/// [`MAX_PKG_LEN`]. It is always capped at the largest value representable by
+/// three bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct U24<const LIMIT: u64 = MAX_PKG_LEN>(u32);
+
+impl<const LIMIT: u64> U24<LIMIT> {
+    pub const TYPE_MAX: u32 = 0x00ff_ffff;
+    pub const MAX: u32 = if LIMIT > Self::TYPE_MAX as u64 {
+        Self::TYPE_MAX
+    } else {
+        LIMIT as u32
+    };
+
+    pub const fn new(value: u32) -> Option<Self> {
+        if value <= Self::MAX {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl<const LIMIT: u64> TryFrom<u32> for U24<LIMIT> {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or("value exceeds U24::MAX")
+    }
+}
+
+impl<const LIMIT: u64> From<U24<LIMIT>> for u32 {
+    fn from(value: U24<LIMIT>) -> Self {
+        value.0
+    }
+}
+
+impl<const LIMIT: u64> FromPrimitive for U24<LIMIT> {
+    fn from_i64(value: i64) -> Option<Self> {
+        u32::try_from(value).ok().and_then(Self::new)
+    }
+
+    fn from_u64(value: u64) -> Option<Self> {
+        u32::try_from(value).ok().and_then(Self::new)
+    }
+}
+
+impl<const LIMIT: u64> ToPrimitive for U24<LIMIT> {
+    fn to_i64(&self) -> Option<i64> {
+        Some(self.0 as i64)
+    }
+
+    fn to_u64(&self) -> Option<u64> {
+        Some(self.0 as u64)
+    }
+}
+
+impl<const LIMIT: u64> RawFixedBytes for U24<LIMIT> {
+    fn raw_bytes() -> Option<usize> {
+        Some(3)
+    }
+}
+
+impl<const LIMIT: u64> RawEncode for U24<LIMIT> {
+    fn raw_measure(&self, _purpose: &Option<RawEncodePurpose>) -> CodecResult<usize> {
+        Ok(3)
+    }
+
+    fn raw_encode<'a>(
+        &self,
+        buf: &'a mut [u8],
+        _purpose: &Option<RawEncodePurpose>,
+    ) -> CodecResult<&'a mut [u8]> {
+        if buf.len() < 3 {
+            return Err(CodecError::new(
+                CodecErrorCode::OutOfLimit,
+                "not enough buffer for U24",
+            ));
+        }
+        let bytes = self.0.to_be_bytes();
+        buf[..3].copy_from_slice(&bytes[1..]);
+        Ok(&mut buf[3..])
+    }
+}
+
+impl<'de, const LIMIT: u64> RawDecode<'de> for U24<LIMIT> {
+    fn raw_decode(buf: &'de [u8]) -> CodecResult<(Self, &'de [u8])> {
+        if buf.len() < 3 {
+            return Err(CodecError::new(
+                CodecErrorCode::OutOfLimit,
+                "not enough buffer for U24",
+            ));
+        }
+        let value = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]);
+        Ok((Self(value), &buf[3..]))
+    }
+}
+
+impl<const LIMIT: u64> CmdPkgLen for U24<LIMIT> {
+    const MAX_PKG_LEN: u64 = Self::MAX as u64;
+}
+
+fn validate_pkg_len(len: u64, max_len: u64) -> CmdResult<()> {
+    if len > max_len {
         return Err(cmd_err!(
             CmdErrorCode::InvalidParam,
             "body len {} exceeds max package len {}",
             len,
-            MAX_PKG_LEN
+            max_len
         ));
     }
     Ok(())
 }
 
-pub(crate) fn encode_pkg_len<LEN: FromPrimitive>(len: u64) -> CmdResult<LEN> {
-    validate_pkg_len(len)?;
+pub(crate) fn encode_pkg_len<LEN: CmdPkgLen>(len: u64) -> CmdResult<LEN> {
+    validate_pkg_len(len, LEN::MAX_PKG_LEN)?;
     LEN::from_u64(len).ok_or_else(|| {
         cmd_err!(
             CmdErrorCode::InvalidParam,
@@ -41,7 +268,7 @@ pub(crate) fn encode_pkg_len<LEN: FromPrimitive>(len: u64) -> CmdResult<LEN> {
     })
 }
 
-pub(crate) fn decode_pkg_len<LEN: ToPrimitive>(len: LEN) -> CmdResult<(u64, usize)> {
+pub(crate) fn decode_pkg_len<LEN: CmdPkgLen>(len: LEN) -> CmdResult<(u64, usize)> {
     let len = len.to_u64().ok_or_else(|| {
         cmd_err!(
             CmdErrorCode::InvalidParam,
@@ -49,7 +276,7 @@ pub(crate) fn decode_pkg_len<LEN: ToPrimitive>(len: LEN) -> CmdResult<(u64, usiz
             std::any::type_name::<LEN>()
         )
     })?;
-    validate_pkg_len(len)?;
+    validate_pkg_len(len, LEN::MAX_PKG_LEN)?;
     let usize_len = usize::try_from(len).map_err(|_| {
         cmd_err!(
             CmdErrorCode::InvalidParam,
@@ -69,10 +296,8 @@ pub struct CmdHeader<LEN, CMD> {
     seq: Option<u32>,
 }
 
-impl<
-    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
-    CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static,
-> CmdHeader<LEN, CMD>
+impl<LEN: CmdPkgLen, CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static>
+    CmdHeader<LEN, CMD>
 {
     pub fn new(version: u8, is_resp: bool, seq: Option<u32>, cmd_code: CMD, pkg_len: LEN) -> Self {
         Self {
@@ -269,14 +494,7 @@ impl<R: AsyncRead + Send + 'static + Unpin, W: AsyncWrite + Send + 'static + Unp
 #[callback_trait::callback_trait]
 pub trait CmdHandler<LEN, CMD>: Send + Sync + 'static
 where
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static,
 {
     async fn handle(
@@ -295,14 +513,7 @@ pub(crate) struct CmdHandlerMap<LEN, CMD> {
 
 impl<LEN, CMD> CmdHandlerMap<LEN, CMD>
 where
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Eq + Hash,
 {
     pub fn new() -> Self {
@@ -424,7 +635,6 @@ impl CmdBody {
                 "chained body length exceeds u64"
             )
         })?;
-        validate_pkg_len(length)?;
         Ok(Self {
             length,
             reader: Box::new(tokio::io::AsyncReadExt::chain(self, other)),
@@ -558,11 +768,12 @@ pub(crate) async fn copy_cmd_body<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CmdBody, CmdBodyRead, CmdBodyReadAll, CmdHeader, MAX_PKG_LEN, decode_pkg_len,
-        encode_pkg_len,
+        CmdBody, CmdBodyRead, CmdBodyReadAll, CmdHeader, CmdPkgLen, MAX_PKG_LEN, U8, U16, U24,
+        decode_pkg_len, encode_pkg_len,
     };
     use crate::errors::CmdErrorCode;
     use crate::{CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+    use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -572,23 +783,95 @@ mod tests {
 
     #[test]
     fn pkg_len_overflow_returns_invalid_param() {
-        assert_eq!(encode_pkg_len::<u8>(u8::MAX as u64).unwrap(), u8::MAX);
+        assert_eq!(encode_pkg_len::<U8>(u8::MAX as u64).unwrap().get(), u8::MAX);
         assert_eq!(
-            encode_pkg_len::<u8>(u8::MAX as u64 + 1).unwrap_err().code(),
+            encode_pkg_len::<U8>(u8::MAX as u64 + 1).unwrap_err().code(),
             CmdErrorCode::InvalidParam
         );
         assert_eq!(
-            encode_pkg_len::<u32>(MAX_PKG_LEN).unwrap(),
+            encode_pkg_len::<U24>(MAX_PKG_LEN).unwrap().get(),
             MAX_PKG_LEN as u32
         );
         assert_eq!(
-            encode_pkg_len::<u32>(MAX_PKG_LEN + 1).unwrap_err().code(),
+            encode_pkg_len::<U24>(MAX_PKG_LEN + 1).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+        let (invalid_len, _) = U24::<MAX_PKG_LEN>::raw_decode(&[0x10, 0x00, 0x01]).unwrap();
+        assert_eq!(
+            decode_pkg_len(invalid_len).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+    }
+
+    #[test]
+    fn pkg_len_types_declare_protocol_limits() {
+        assert_eq!(<U8 as CmdPkgLen>::MAX_PKG_LEN, u8::MAX as u64);
+        assert_eq!(<U16 as CmdPkgLen>::MAX_PKG_LEN, u16::MAX as u64);
+        assert_eq!(<U24 as CmdPkgLen>::MAX_PKG_LEN, MAX_PKG_LEN);
+
+        assert_eq!(
+            encode_pkg_len::<U16>(u16::MAX as u64 + 1)
+                .unwrap_err()
+                .code(),
             CmdErrorCode::InvalidParam
         );
         assert_eq!(
-            decode_pkg_len((MAX_PKG_LEN + 1) as u32).unwrap_err().code(),
+            encode_pkg_len::<U24>(MAX_PKG_LEN + 1).unwrap_err().code(),
             CmdErrorCode::InvalidParam
         );
+    }
+
+    #[test]
+    fn fixed_width_pkg_len_types_support_user_defined_limits() {
+        type Max100U8 = U8<100>;
+        type Max1000U16 = U16<1000>;
+        type TwoMiBU24 = U24<{ 2 * 1024 * 1024 }>;
+
+        assert_eq!(encode_pkg_len::<Max100U8>(100).unwrap().get(), 100);
+        assert_eq!(Max100U8::raw_bytes(), Some(1));
+        assert_eq!(
+            encode_pkg_len::<Max100U8>(101).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+
+        assert_eq!(encode_pkg_len::<Max1000U16>(1000).unwrap().get(), 1000);
+        assert_eq!(Max1000U16::raw_bytes(), Some(2));
+        assert_eq!(
+            encode_pkg_len::<Max1000U16>(1001).unwrap_err().code(),
+            CmdErrorCode::InvalidParam
+        );
+
+        let u24_len = encode_pkg_len::<TwoMiBU24>(MAX_PKG_LEN + 1).unwrap();
+        assert_eq!(u24_len.get(), (MAX_PKG_LEN + 1) as u32);
+        assert_eq!(TwoMiBU24::raw_bytes(), Some(3));
+
+        assert_eq!(
+            encode_pkg_len::<TwoMiBU24>(2 * 1024 * 1024 + 1)
+                .unwrap_err()
+                .code(),
+            CmdErrorCode::InvalidParam
+        );
+    }
+
+    #[test]
+    fn u24_uses_exactly_three_big_endian_bytes() {
+        type FullU24 = U24<0x00ff_ffff>;
+
+        let value = FullU24::new(0x12_3456).unwrap();
+        assert_eq!(FullU24::raw_bytes(), Some(3));
+        assert_eq!(value.raw_encode_to_buffer().unwrap(), [0x12, 0x34, 0x56]);
+
+        let (decoded, remaining) = FullU24::raw_decode(&[0xab, 0xcd, 0xef, 0x42]).unwrap();
+        assert_eq!(decoded.get(), 0xab_cdef);
+        assert_eq!(remaining, [0x42]);
+        assert!(FullU24::new(FullU24::MAX + 1).is_none());
+
+        let header = CmdHeader::<FullU24, u8>::new(1, false, Some(7), 0x11, value);
+        let encoded = header.raw_encode_to_buffer().unwrap();
+        assert_eq!(&encoded[..3], [0x12, 0x34, 0x56]);
+        let (decoded, remaining) = CmdHeader::<FullU24, u8>::raw_decode(&encoded).unwrap();
+        assert_eq!(decoded.pkg_len(), value);
+        assert!(remaining.is_empty());
     }
 
     struct TestRead {
@@ -677,8 +960,8 @@ mod tests {
     }
 
     #[test]
-    fn cmd_body_chain_rejects_package_larger_than_limit() {
-        let first = CmdBody::from_reader(io::Cursor::new(Vec::<u8>::new()), MAX_PKG_LEN);
+    fn cmd_body_chain_rejects_u64_length_overflow() {
+        let first = CmdBody::from_reader(io::Cursor::new(Vec::<u8>::new()), u64::MAX);
         let second = CmdBody::from_reader(io::Cursor::new(Vec::<u8>::new()), 1);
 
         assert_eq!(
@@ -739,10 +1022,10 @@ mod tests {
 
     #[test]
     fn cmd_header_set_pkg_len() {
-        let mut header = CmdHeader::<u16, u8>::new(1, false, Some(7), 0x11, 3);
-        assert_eq!(header.pkg_len(), 3);
-        header.set_pkg_len(9);
-        assert_eq!(header.pkg_len(), 9);
+        let mut header = CmdHeader::<U16, u8>::new(1, false, Some(7), 0x11, U16::new(3).unwrap());
+        assert_eq!(header.pkg_len().get(), 3);
+        header.set_pkg_len(U16::new(9).unwrap());
+        assert_eq!(header.pkg_len().get(), 9);
     }
 
     #[tokio::test]

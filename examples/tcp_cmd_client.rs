@@ -7,7 +7,7 @@ use rustls::version::TLS13;
 use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
 use sfo_cmd_server::client::{CmdClient, CmdTunnelFactory, DefaultCmdClient};
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
-use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId, U16};
 use sha2::Digest;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
@@ -257,14 +257,14 @@ impl CmdTunnelFactory<(), TlsStreamRead, TlsStreamWrite> for TlsConnectionFactor
 }
 #[tokio::main]
 async fn main() {
-    let client = DefaultCmdClient::<(), TlsStreamRead, TlsStreamWrite, _, u16, u8>::new(
+    let client = DefaultCmdClient::<(), TlsStreamRead, TlsStreamWrite, _, U16, u8>::new(
         TlsConnectionFactory::new(),
         5,
     );
 
     client.register_cmd_handler(
         0x02,
-        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<U16, u8>, _body| async move {
             println!("recv cmd {}", header.cmd_code());
             Ok(None)
         },
@@ -272,7 +272,7 @@ async fn main() {
 
     client.register_cmd_handler(
         0x06,
-        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<u16, u8>, _body| async move {
+        move |_local_id, _peer_id, _tunnel_id, header: CmdHeader<U16, u8>, _body| async move {
             println!("recv cmd {}", header.cmd_code());
             Ok(Some(CmdBody::from_string("client resp 6".to_string())))
         },

@@ -11,7 +11,6 @@ use crate::peer_id::PeerId;
 use crate::{CmdBody, CmdTunnelMeta, CmdTunnelRead, CmdTunnelWrite, TunnelId, TunnelIdGenerator};
 use async_named_locker::ObjectHolder;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
-use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::{
     ClassifiedWorker, ClassifiedWorkerFactory, ClassifiedWorkerGuard, ClassifiedWorkerPool,
     ClassifiedWorkerPoolConfig, ClassifiedWorkerPoolRef, PoolErrorCode, PoolResult,
@@ -38,14 +37,7 @@ pub trait CmdTunnelFactory<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWr
 
 pub struct CommonCmdSend<M: CmdTunnelMeta, R: CmdTunnelRead<M>, W: CmdTunnelWrite<M>, LEN, CMD>
 where
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 {
     pub(crate) recv_handle: JoinHandle<CmdResult<()>>,
@@ -61,7 +53,7 @@ where
 // impl<R, W, LEN, CMD> Deref for CmdSend<R, W, LEN, CMD>
 // where R: CmdTunnelRead,
 //       W: CmdTunnelWrite,
-//       LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+//       LEN: crate::CmdPkgLen,
 //       CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes {
 //     type Target = W;
 //
@@ -75,14 +67,7 @@ where
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 {
     pub fn new(
@@ -445,14 +430,7 @@ where
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 {
     fn drop(&mut self) {
@@ -465,14 +443,7 @@ where
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 {
     fn get_tunnel_meta(&self) -> Option<Arc<M>> {
@@ -489,14 +460,7 @@ where
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 {
     fn is_work(&self) -> bool {
@@ -550,7 +514,7 @@ pub struct CmdWriteFactory<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug,
 > {
     tunnel_factory: F,
@@ -565,7 +529,7 @@ impl<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + FromPrimitive + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug,
 > CmdWriteFactory<M, R, W, F, LEN, CMD>
 {
@@ -590,15 +554,7 @@ impl<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive
-        + RawFixedBytes,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + RawFixedBytes + Debug,
 > ClassifiedWorkerFactory<TunnelId, CommonCmdSend<M, R, W, LEN, CMD>>
     for CmdWriteFactory<M, R, W, F, LEN, CMD>
@@ -723,15 +679,7 @@ pub struct DefaultCmdClient<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive
-        + RawFixedBytes,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -757,15 +705,7 @@ impl<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive
-        + RawFixedBytes,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy
@@ -908,15 +848,7 @@ impl<
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
     F: CmdTunnelFactory<M, R, W>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive
-        + RawFixedBytes,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode
         + for<'a> RawDecode<'a>
         + Copy

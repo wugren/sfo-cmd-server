@@ -4,22 +4,13 @@ mod server;
 use crate::errors::CmdResult;
 use crate::{CmdBody, CmdHandler, PeerId, TunnelId};
 use bucky_raw_codec::{RawDecode, RawEncode, RawFixedBytes};
-use num::{FromPrimitive, ToPrimitive};
 pub use server::*;
 use std::hash::Hash;
 use std::time::Duration;
 
 #[async_trait::async_trait]
 pub trait CmdServer<
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
 >: 'static + Send + Sync
 {

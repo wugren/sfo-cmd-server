@@ -11,7 +11,6 @@ use async_named_locker::ObjectHolder;
 use bucky_raw_codec::{RawConvertTo, RawDecode, RawEncode, RawFixedBytes, RawFrom};
 pub use classified_node::*;
 pub use node::*;
-use num::{FromPrimitive, ToPrimitive};
 use sfo_pool::WorkerClassification;
 use sfo_split::{RHalf, WHalf};
 use std::fmt::Debug;
@@ -24,15 +23,7 @@ use tokio::task::JoinHandle;
 
 #[async_trait::async_trait]
 pub trait CmdNode<
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     M: CmdTunnelMeta,
     S: CmdSend<M>,
@@ -183,15 +174,7 @@ pub trait CmdNode<
 
 #[async_trait::async_trait]
 pub trait ClassifiedCmdNode<
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + RawFixedBytes
-        + Sync
-        + Send
-        + 'static
-        + FromPrimitive
-        + ToPrimitive,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + RawFixedBytes + Sync + Send + 'static + Eq + Hash,
     C: WorkerClassification,
     M: CmdTunnelMeta,
@@ -368,15 +351,7 @@ pub(crate) fn create_recv_handle<
     M: CmdTunnelMeta,
     R: CmdTunnelRead<M>,
     W: CmdTunnelWrite<M>,
-    LEN: RawEncode
-        + for<'a> RawDecode<'a>
-        + Copy
-        + Send
-        + Sync
-        + 'static
-        + FromPrimitive
-        + ToPrimitive
-        + RawFixedBytes,
+    LEN: crate::CmdPkgLen,
     CMD: RawEncode + for<'a> RawDecode<'a> + Copy + Send + Sync + 'static + Debug + RawFixedBytes,
 >(
     mut reader: RHalf<R, W>,

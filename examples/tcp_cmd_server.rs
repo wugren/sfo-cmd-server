@@ -8,7 +8,7 @@ use rustls::version::TLS13;
 use rustls::{DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme};
 use sfo_cmd_server::errors::{CmdErrorCode, CmdResult, into_cmd_err};
 use sfo_cmd_server::server::{CmdServer, CmdTunnelListener, DefaultCmdServer};
-use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId};
+use sfo_cmd_server::{CmdBody, CmdHeader, CmdTunnel, CmdTunnelRead, CmdTunnelWrite, PeerId, U16};
 use sha2::Digest;
 use std::fmt::Debug;
 use std::pin::Pin;
@@ -250,11 +250,11 @@ impl CmdTunnelListener<(), TlsStreamRead, TlsStreamWrite> for TunnelListener {
 #[tokio::main]
 async fn main() {
     let listener = TunnelListener::bind("127.0.0.1:4453").await.unwrap();
-    let server = DefaultCmdServer::<(), TlsStreamRead, TlsStreamWrite, u16, u8, _>::new(listener);
+    let server = DefaultCmdServer::<(), TlsStreamRead, TlsStreamWrite, U16, u8, _>::new(listener);
     let sender = server.clone();
     server.register_cmd_handler(
         0x01,
-        move |_local_id, peer_id, _tunnel_id, _header: CmdHeader<u16, u8>, _body_read| {
+        move |_local_id, peer_id, _tunnel_id, _header: CmdHeader<U16, u8>, _body_read| {
             let sender = sender.clone();
             async move {
                 sender.send(&peer_id, 0x02, 0, vec![].as_slice()).await?;
@@ -291,7 +291,7 @@ async fn main() {
         move |_local_id,
               _peer_id,
               _tunnel_id,
-              header: CmdHeader<u16, u8>,
+              header: CmdHeader<U16, u8>,
               mut _body_read: CmdBody| {
             async move {
                 println!(

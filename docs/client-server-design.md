@@ -26,7 +26,7 @@
 
 所有消息都按 `header_len(u8) + CmdHeader + body` 发送，其中 `header_len` 是 `CmdHeader` 编码后的字节长度，因此 header 本身必须满足 `<= 255`。
 
-`CmdHeader.pkg_len` 表示 body 长度，收发两侧统一限制为最多 1 MiB（`MAX_PKG_LEN`）。`CmdBody` 的读取和发送都严格限制在声明的剩余长度内；底层 reader 提前 EOF 会返回错误，超过声明长度的数据不会进入当前协议帧。
+`CmdHeader.pkg_len` 表示 body 长度。长度类型必须实现 `CmdPkgLen`，并通过关联常量声明协议允许的最大包长。协议提供 `U8<LIMIT>`、`U16<LIMIT>`、`U24<LIMIT>` 三种类型，分别固定编码为 1、2、3 字节；例如 `U16<1000>` 最大允许 1000 字节，`U24<{ 2 * 1024 * 1024 }>` 最大允许 2 MiB。省略泛型参数时使用 1 MiB 默认值，并自动受对应字节宽度的自然最大值限制。`CmdBody` 的读取和发送都严格限制在声明的剩余长度内；底层 reader 提前 EOF 会返回错误，超过声明长度的数据不会进入当前协议帧。
 
 `CmdHeader<LEN, CMD>` 包含：
 
